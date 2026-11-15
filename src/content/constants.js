@@ -14,6 +14,8 @@
 	});
 
 
+	CC.CONST = Object.freeze({ CACHE_WINDOW_MS: 5 * 60 * 1000 });
+
 	CC.COLORS = Object.freeze({
 		PROGRESS_FILL_DARK: '#2c84db',
 		PROGRESS_FILL_LIGHT: '#5aa6ff',

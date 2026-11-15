@@ -13,9 +13,9 @@ function clone(value) {
 	return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie = '', usage, conversations = {}, startMs } = {}) {
+async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie = '', usage, conversations = {}, showTokenCounter = false, startMs } = {}) {
 	const clock = createClock(startMs);
-	const calls = { setUsage: [], setMetrics: [], titles: [], pending: [], uiOpts: null, usageRequests: [], conversationRequests: [] };
+	const calls = { setUsage: [], setMetrics: [], titles: [], pending: [], uiOpts: null, usageRequests: [], conversationRequests: [], tokenStates: [], tokenizerLoads: [] };
 	const handlers = {};
 
 	// What the bridge answers. Tests replace these.
@@ -53,6 +53,7 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 			this.opts = opts;
 			calls.uiOpts = opts;
 		}
+		setTokenCounter(state) { calls.tokenStates.push(clone(state)); }
 		initialize() {}
 		attachUsageLine() {}
 		attachHeader() {}
@@ -72,7 +73,7 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 	}
 
 	const env = createContentEnv({
-		files: ['content/constants.js'],
+		files: ['content/config.js', 'content/constants.js'],
 		storage,
 		pathname,
 		extraGlobals: {
@@ -94,11 +95,20 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 	CC.bridge = bridge;
 	CC.injectBridgeOnce = () => Promise.resolve(true);
 
+	CC.config = { showTokenCounter };
+	env.load(['content/token-counter.js']);
+	let tokenCounter;
+	const Counter = CC.OptionalTokenCounter;
+	CC.OptionalTokenCounter = class extends Counter { constructor(opts) { super(opts); tokenCounter = this; } };
+
+	CC.ensureTokenizer = async () => { calls.tokenizerLoads.push(clock.now); };
+	CC.tokens = { computeConversationMetrics: async (data) => ({ totalTokens: data.fakeTokens ?? data.chat_messages.length * 10, trunkMessageCount: data.chat_messages.length }) };
 	env.load(['content/main.js']);
 	await clock.flush();
 
 	return {
 		...env,
+		tokenCounter,
 		clock,
 		calls,
 		answers,

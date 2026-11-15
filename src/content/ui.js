@@ -126,8 +126,9 @@
 	}
 
 	class CounterUI {
-		constructor({ onUsageRefresh } = {}) {
+		constructor({ onUsageRefresh, onTokenCounterRefresh } = {}) {
 			this.onUsageRefresh = onUsageRefresh || null;
+			this.onTokenCounterRefresh = onTokenCounterRefresh || (() => {});
 			this.sessionHistory = [];
 			this.sessionResetKey = null;
 			this.refreshingUsage = false;
@@ -270,9 +271,23 @@
 		_initUsageLine() {
 			this.usageLine = document.createElement('div');
 			this.usageLine.className = 'cc-usageRow cc-unmounted';
+			this.tokenDisplay = document.createElement('button');
+			this.tokenDisplay.type = 'button';
+			this.tokenDisplay.className = 'cc-tokenCounter cc-hidden';
+			this.tokenDisplay.textContent = 'Tokens: —';
+			this.tokenDisplay.addEventListener('click', (event) => {
+				event.stopPropagation();
+				this.onTokenCounterRefresh();
+			});
+			this.usageLine.appendChild(this.tokenDisplay);
+			this.quotaGroups = document.createElement('div');
+			this.quotaGroups.className = 'cc-quotaGroups';
+			this.usageLine.appendChild(this.quotaGroups);
 			const makeGroup = (label) => {
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
+				group.setAttribute('role', 'group');
+				group.setAttribute('aria-label', `${label} usage`);
 				const span = document.createElement('span');
 				span.className = 'cc-usageText';
 				const labelEl = document.createElement('span');
@@ -297,6 +312,7 @@
 			};
 			for (const [key, label] of [['session', L.session], ['weekly', L.weekly]]) {
 				const g = makeGroup(label);
+				g.group.classList.add(`cc-usageGroup--${key}`);
 				this[`${key}Group`] = g.group;
 				this[`${key}UsageSpan`] = g.span;
 				this[`${key}Bar`] = g.bar;
@@ -304,7 +320,7 @@
 				this[`${key}Marker`] = g.marker;
 				this[`${key}PctSpan`] = g.pct;
 				this[`${key}ResetSpan`] = g.reset;
-				this.usageLine.appendChild(g.group);
+				this.quotaGroups.appendChild(g.group);
 			}
 
 			this.refreshProgressChrome();
@@ -322,7 +338,16 @@
 			});
 		}
 
+		setTokenCounter({ enabled, active, totalTokens, status }) {
+			const visible = enabled && active;
+			this.tokenDisplay.classList.toggle('cc-hidden', !visible);
+			this.usageLine.classList.toggle('cc-usageRow--tokens', visible);
+			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? `~${totalTokens.toLocaleString()} tokens` : status === 'error' ? 'Tokens unavailable' : 'Counting…';
+		}
+
 		_setupTooltips() {
+			this.tokenTooltip = makeTooltip('Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.');
+			setupTooltip(this.tokenDisplay, this.tokenTooltip, { topOffset: 8 });
 			this.sessionTooltip = makeTooltip(
 				this._usageTooltipText('session')
 			);

@@ -243,3 +243,15 @@ test('U54 an offscreen previous editor cannot win over the visible chat', () => 
 	env.ui.attach();
 	assert.equal(env.ui.usageLine.nextElementSibling, current.box);
 });
+
+test('U55 token counter is hidden initially and appears before the quota groups when enabled', () => {
+	const env = createUiEnv();
+	assert.equal(env.ui.tokenDisplay.classList.contains('cc-hidden'), true);
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: 12345, status: 'ready' });
+	assert.equal(env.ui.tokenDisplay.classList.contains('cc-hidden'), false);
+	assert.equal(env.ui.tokenDisplay.textContent, '~12,345 tokens');
+	assert.equal(env.ui.tokenDisplay.nextElementSibling, env.ui.quotaGroups);
+	assert.match(env.ui.tokenTooltip.textContent, /compaction/);
+	env.ui.setTokenCounter({ enabled: false, active: true });
+	assert.equal(env.ui.tokenDisplay.classList.contains('cc-hidden'), true);
+});

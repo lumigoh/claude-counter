@@ -2,9 +2,13 @@
 
 Session and weekly Claude usage bars, with quota percentages, reset countdowns and readable tooltips. A personal build of [she-llac/claude-counter](https://github.com/she-llac/claude-counter), incorporating #60, #15 and adapted #57 improvements.
 
-## Personal build 2.1.5
+## Personal build 2.1.6
 
-The token summary and estimated cache timer have been retired. Their complete implementation is preserved on the [archive branch](https://github.com/lumigoh/claude-counter/tree/archive/token-summary-v2.1.3); see the [archive notes](docs/token-summary-archive.md). Current builds do not load the tokenizer or fetch conversation trees for counting.
+The approximate token counter is available again as an **opt-in code flag**, displayed on the left of the existing quota row. It defaults to disabled. The old cache timer, separate summary and 200k reference bar remain archived on the [archive branch](https://github.com/lumigoh/claude-counter/tree/archive/token-summary-v2.1.3).
+
+To enable it, set `showTokenCounter: true` in [src/content/config.js](src/content/config.js), then reload the extension and Claude. For the userscript, edit the same flag near the top of the installed script in your manager and save/reload. There is no settings button or stored UI preference. Userscript updates may replace your local code edit, so reapply the flag after updating if needed.
+
+The count estimates visible conversation history and can be inaccurate after compaction; it is not Claude's active context usage. It refreshes on opening/switching chats and after replies; click the count to recount. Disabled builds do not initialize the tokenizer or fetch conversations for counting. The extension loads the vendored tokenizer on demand; the userscript bundles it inside a function that runs only when enabled.
 
 ## Features
 

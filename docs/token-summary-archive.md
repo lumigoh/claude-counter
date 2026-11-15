@@ -11,4 +11,4 @@ git fetch origin archive/token-summary-v2.1.3
 git switch --detach origin/archive/token-summary-v2.1.3
 ```
 
-Current builds retain session/weekly quota tracking. They do not load the tokenizer or fetch conversation trees for token counting.
+Version 2.1.6 reintroduces only the plain approximate token count, on the left of the quota row, behind the `showTokenCounter` code flag (default `false`). The old separate summary, cache timer and reference bar remain archived. With the flag off, current builds do not initialize the tokenizer or fetch conversation trees for counting.

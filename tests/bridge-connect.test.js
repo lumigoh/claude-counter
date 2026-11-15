@@ -145,7 +145,7 @@ test('T07b a gzip frame keeps its order relative to plain frames', async () => {
 	assert.deepEqual(values, [0.5, 0.6]);
 });
 
-test('T08 old SSE path: unchanged result, Connect handler not involved', async () => {
+test('T08 legacy SSE keeps limits and reports completion for optional counting', async () => {
 	const sse = `event: message_limit\ndata: ${JSON.stringify(fixtures.old_sse_message_limit)}\n\n`;
 	let response;
 	const env = createBridgeEnv({
@@ -159,7 +159,7 @@ test('T08 old SSE path: unchanged result, Connect handler not involved', async (
 	await settle();
 
 	assert.deepEqual(limits(env), [fixtures.old_sse_message_limit.message_limit]);
-	assert.equal(env.events('cc:turn_end').length, 0, 'the old path does not emit turn_end');
+	assert.equal(env.events('cc:turn_end').length, 1, 'legacy completion signals the optional counter after the stream ends');
 	assert.equal(env.events('cc:generation_start').length, 1);
 });
 

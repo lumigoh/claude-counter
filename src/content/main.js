@@ -204,7 +204,9 @@
 	let usageEndpointEmpty = false;
 	let usageEndpointHasData = false;
 
+	let tokenCounter;
 	const ui = new CC.ui.CounterUI({
+		onTokenCounterRefresh: () => tokenCounter?.refresh(),
 		onUsageRefresh: async () => {
 			await refreshUsage();
 		}
@@ -213,6 +215,7 @@
 
 	// Bridge must be ready before we can make requests
 	const bridgeReady = CC.injectBridgeOnce();
+	tokenCounter = new CC.OptionalTokenCounter({ ui, bridgeReady, getOrgId });
 
 	function windowResetMs(w) {
 		if (!w || w.expired || !w.resets_at) return null;

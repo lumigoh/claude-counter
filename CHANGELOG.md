@@ -2,6 +2,16 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.6] - 2026-11-15
+
+### Added
+- Optional approximate token count on the left of the existing quota row, with session/weekly usage on the right. Compact container-based styling keeps the count and quotas on one line at narrow widths.
+- Code-only configuration in `src/content/config.js` and near the top of the generated userscript: `showTokenCounter: false` by default. There is no settings button and no stored UI preference.
+- The tokenizer initializes and conversation requests run only when the code flag is enabled. The extension loads the vendored tokenizer on demand; the standalone userscript bundles it in a lazy initializer.
+- Counts refresh when opening/switching chats, after Connect or legacy SSE replies, on branch navigation and by clicking the count. Delayed server persistence is retried with a bound; responses from an old chat or a disabled counter are ignored.
+- The tooltip preserves the compaction accuracy caveat. The cache timer, separate summary and context reference bar remain archived.
+- Validation: 102 automated tests pass, including default-off behavior, code opt-in, delayed reply persistence, late navigation/disable responses and token math. Simulated Chromium checks cover both code-flag modes, inline layout from 360–1280px, existing fade/hydration behavior and both tokenizer loader paths.
+
 ## [2.1.5] - 2026-11-15
 
 ### Added

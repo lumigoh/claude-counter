@@ -54,7 +54,7 @@
 
 		const contentType = response.headers.get('content-type') || '';
 		if (contentType.includes('event-stream')) {
-			handleEventStream(response);
+			handleEventStream(response, method === 'POST' && /\/(?:retry_)?completion(?:[/?]|$)/.test(url));
 			if (method === 'POST') post('cc:stream_started', {});
 		}
 
@@ -94,7 +94,7 @@
 		return '';
 	}
 
-	async function handleEventStream(response) {
+	async function handleEventStream(response, announceTurnEnd = false) {
 		try {
 			const cloned = response.clone();
 			const reader = cloned.body?.getReader?.();
@@ -124,6 +124,7 @@
 					}
 				}
 			}
+			if (announceTurnEnd) post('cc:turn_end', {});
 		} catch {
 			// best-effort; don't break claude.ai
 		}

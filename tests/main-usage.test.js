@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createMainEnv, liveWindow, limitsEvent, ORG } = require('./helpers/main-harness');
+const { createMainEnv, liveWindow, limitsEvent, ORG, CONV } = require('./helpers/main-harness');
 
 const START = Date.UTC(2026, 9, 14, 12, 0, 0);
 const MIN = 60 * 1000;
@@ -396,4 +396,71 @@ test('M21 opening a chat and completing a turn do not fetch token-summary data',
 	await env.clock.advance(20000);
 	assert.equal(env.calls.conversationRequests.length, 0);
 	assert.equal(env.calls.setMetrics.length, 0);
+});
+
+test('M22 the code flag defaults off, regardless of an old saved preference', async () => {
+	const env = await createMainEnv({ storage: { ...orgStored, claude_counter_show_tokens: true }, startMs: START, usage: emptyUsage });
+	await env.emit('cc:turn_end', {});
+	await env.clock.advance(20000);
+	assert.equal(env.calls.tokenStates.at(-1).enabled, false);
+	assert.equal(env.calls.tokenizerLoads.length, 0);
+	assert.equal(env.calls.conversationRequests.length, 0);
+});
+
+test('M23 the code flag enables the counter at startup without a saved preference', async () => {
+	const env = await createMainEnv({ storage: orgStored, showTokenCounter: true, conversations: { [CONV]: { chat_messages: [{}, {}], fakeTokens: 345 } }, startMs: START, usage: emptyUsage });
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 345);
+	assert.equal(env.calls.conversationRequests.length, 1);
+	assert.equal(env.stored('claude_counter_show_tokens'), undefined);
+});
+
+test('M24 the code opt-in is honored and navigation cannot show a late previous-chat count', async () => {
+	const env = await createMainEnv({ storage: orgStored, showTokenCounter: true, startMs: START, usage: emptyUsage });
+	let finish;
+	env.answers.conversation = async () => new Promise((resolve) => { finish = resolve; });
+	const refresh = env.calls.uiOpts.onTokenCounterRefresh();
+	await env.clock.flush();
+	await env.navigate('/new');
+	finish({ chat_messages: [{}], fakeTokens: 999 });
+	await refresh;
+	assert.equal(env.calls.tokenStates.at(-1).active, false);
+	assert.notEqual(env.calls.tokenStates.at(-1).totalTokens, 999);
+});
+
+test('M25 disabling while a conversation is loading ignores its eventual count', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	let finish;
+	env.answers.conversation = async () => new Promise((resolve) => { finish = resolve; });
+	const enabling = env.tokenCounter.setEnabled(true);
+	await env.clock.flush();
+	await env.tokenCounter.setEnabled(false);
+	finish({ chat_messages: [{}], fakeTokens: 999 });
+	await enabling;
+	assert.equal(env.calls.tokenStates.at(-1).enabled, false);
+	assert.notEqual(env.calls.tokenStates.at(-1).totalTokens, 999);
+});
+
+test('M26 end-of-turn counting retries while new messages have not been stored', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	let messages = [{}];
+	env.answers.conversation = async () => ({ chat_messages: messages });
+	await env.tokenCounter.setEnabled(true);
+	await env.emit('cc:turn_end', {});
+	await env.clock.advance(1300);
+	assert.equal(env.calls.conversationRequests.length, 2);
+	messages = [{}, {}];
+	await env.clock.advance(5000);
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 20);
+	const count = env.calls.conversationRequests.length;
+	await env.clock.advance(20000);
+	assert.equal(env.calls.conversationRequests.length, count);
+});
+
+
+test('M27 an enabled counter retries when the organisation is discovered after startup', async () => {
+	const env = await createMainEnv({ showTokenCounter: true, startMs: START, usage: emptyUsage, conversations: { [CONV]: { chat_messages: [{}], fakeTokens: 77 } } });
+	assert.equal(env.calls.conversationRequests.length, 0);
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 77);
 });

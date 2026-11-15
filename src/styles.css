@@ -35,8 +35,9 @@
 .cc-usageRow--above {
 	box-sizing: border-box;
 	justify-content: flex-end;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	row-gap: 6px;
+	container: ccQuota / inline-size;
 	width: 100%;
 	min-width: 0;
 	grid-column: 1 / -1;
@@ -209,4 +210,30 @@
 /* Keep a single group within small phone viewports, including long reset text. */
 @media (max-width: 600px) {
 	.cc-usageRow--above .cc-usageReset { display: none; }
+}
+
+/* The optional count stays left; quota groups stay right. */
+.cc-tokenCounter {
+	appearance: none;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	padding: 0;
+	cursor: pointer;
+	flex: 0 0 auto;
+}
+.cc-tokenCounter { margin-right: auto; white-space: nowrap; line-height: inherit; height: auto; min-height: 0; }
+.cc-quotaGroups { display: flex; align-items: center; gap: 18px; margin-left: auto; min-width: 0; }
+.cc-tokenCounter:focus-visible { outline: 2px solid #6aa9e9; outline-offset: 3px; border-radius: 3px; }
+@container ccQuota (max-width: 760px) {
+	.cc-usageRow--tokens .cc-usageReset { display: none; }
+}
+@container ccQuota (max-width: 480px) {
+	.cc-usageReset, .cc-bar--usage, .cc-usageLabel { display: none; }
+	.cc-usageGroup { gap: 4px; }
+	.cc-quotaGroups { gap: 8px; }
+	.cc-usageGroup--session::before { content: '5h'; }
+	.cc-usageGroup--weekly::before { content: '7d'; }
+	.cc-tokenCounter { font-size: 11px; }
 }
