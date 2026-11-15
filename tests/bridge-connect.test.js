@@ -409,3 +409,15 @@ test('T15b conversation request: a real conversation is delivered and answered',
 	assert.equal(reply.ok, true);
 	assert.equal(env.events('cc:conversation').length, 1);
 });
+
+test('T57 Request objects retain POST generation detection and top-level SSE limits are read', async () => {
+	const payload = { type: 'message_limit', windows: EXPECTED };
+	const bytes = new TextEncoder().encode(`data: ${JSON.stringify(payload)}\n\n`);
+	const env = createBridgeEnv({ originalFetch: async () => streamResponse([bytes], { contentType: 'text/event-stream' }) });
+	const response = await env.fetch(new Request('https://claude.ai/api/organizations/org/chat_conversations/chat/completion', { method: 'POST' }));
+	assert.deepEqual(await readAll(response), Buffer.from(bytes), 'the page still receives its complete response');
+	await settle();
+	assert.equal(env.events('cc:generation_start').length, 1);
+	assert.equal(env.events('cc:stream_started').length, 1);
+	assert.deepEqual(limits(env)[0], payload);
+});

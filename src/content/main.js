@@ -204,6 +204,11 @@
 	const USAGE_WINDOW_KEYS = ['five_hour', 'seven_day'];
 	const USAGE_POLL_MS = 60 * 60 * 1000;
 	const USAGE_RETRY_MS = 60 * 1000;
+	const ACTIVE_USAGE_POLL_MS = 5 * 60 * 1000;
+	let lastUsageUpdateMs = 0;
+	let lastUsageFetchMs = 0;
+	let usageEndpointEmpty = false;
+	let usageEndpointHasData = false;
 
 	const ui = new CC.ui.CounterUI({
 		onUsageRefresh: async () => {
@@ -239,6 +244,7 @@
 		if (!normalized) return;
 		const now = Date.now();
 		const previous = usageState || { five_hour: null, seven_day: null };
+		lastUsageUpdateMs = now;
 		// A window missing from an update keeps what we know: the free plan's /usage reports nothing
 		// even while a window is live, and a limits event may carry only one window.
 		usageState = {
@@ -250,7 +256,7 @@
 			// A saved window that ended while the page was closed is stale: ask for fresh data right away.
 			if (USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
 		} else {
-			nextUsageAttemptMs = now + USAGE_POLL_MS;
+			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
 		if (source !== 'cache') persistUsage();
 		ui.setUsage(usageState);
@@ -318,6 +324,7 @@
 	}
 
 	async function refreshUsage() {
+		if (usageFetchInFlight) return;
 		// Assume failure until a valid answer arrives.
 		nextUsageAttemptMs = Date.now() + USAGE_RETRY_MS;
 		await bridgeReady;
@@ -350,13 +357,32 @@
 			return;
 		}
 		usageFailures = 0;
-		nextUsageAttemptMs = Date.now() + USAGE_POLL_MS;
+		lastUsageFetchMs = Date.now();
+		nextUsageAttemptMs = lastUsageFetchMs + USAGE_POLL_MS;
 
 		// Endpoint reachable but reports no windows (free plan): keep what we know, never wipe the saved snapshot.
 		const parsed = parseUsageFromUsageEndpoint(raw);
+		usageEndpointEmpty = !parsed;
+		usageEndpointHasData = !!parsed;
 		if (!parsed) return;
 		applyUsageUpdate(parsed, 'usage');
 	}
+
+	// Extra refreshes share the failure/empty-answer cooldown with the periodic poll.
+	function refreshUsageIfStale(maxAgeMs) {
+		const now = Date.now();
+		if (document.hidden || usageFetchInFlight) return;
+		if ((usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs) return;
+		if (now - Math.max(lastUsageUpdateMs, lastUsageFetchMs) < maxAgeMs) return;
+		refreshUsage();
+	}
+
+	let streamRefreshTimers = [];
+	CC.bridge.on('cc:stream_started', () => {
+		for (const timer of streamRefreshTimers) clearTimeout(timer);
+		streamRefreshTimers = [20000, 60000].map((delay) => setTimeout(() => refreshUsageIfStale(5000), delay));
+	});
+	window.addEventListener('focus', () => refreshUsageIfStale(60 * 1000));
 
 	async function refreshConversation() {
 		await bridgeReady;
@@ -509,10 +535,9 @@
 		// Usage is org-level: restore/refresh on every page, including home/new
 		const orgId = await getOrgId();
 		updateOrgIdIfNeeded(orgId);
-		if (usageMissing()) {
-			await restoreUsageIfNeeded();
-			if (!usageState) await refreshUsage();
-		}
+		if (usageMissing()) await restoreUsageIfNeeded();
+		if (!usageState && !lastUsageFetchMs && !usageFailures) await refreshUsage();
+		else refreshUsageIfStale(2 * 60 * 1000);
 
 		if (!currentConversationId) {
 			ui.setConversationMetrics();
@@ -588,25 +613,17 @@
 			if (!document.hidden) refreshUsage();
 		}
 
-		// Safety refresh: hourly after a valid answer or fresh limits, every minute after a failure.
+		// Poll useful usage data every five minutes; empty answers and failures keep their backoff.
 		if (!document.hidden && now >= nextUsageAttemptMs) {
 			refreshUsage();
 		}
 	}
 
-	// When tab becomes visible again, update the UI immediately and refresh usage
-	// if the tab was hidden long enough that SSE events may have been missed.
-	let hiddenSinceMs = null;
+	// Keep #15's immediate visible-tab tick and #57's one-minute staleness check.
 	document.addEventListener('visibilitychange', () => {
-		if (document.hidden) {
-			hiddenSinceMs = Date.now();
-		} else {
+		if (!document.hidden) {
 			ui.tick();
-			const STALE_THRESHOLD_MS = 5 * 60 * 1000;
-			if (hiddenSinceMs !== null && Date.now() - hiddenSinceMs > STALE_THRESHOLD_MS) {
-				refreshUsage();
-			}
-			hiddenSinceMs = null;
+			refreshUsageIfStale(60 * 1000);
 		}
 	});
 

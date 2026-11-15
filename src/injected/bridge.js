@@ -37,7 +37,7 @@
 		const url = toAbsoluteUrl(args[0]);
 		const opts = args[1] || {};
 
-		const method = (opts.method || 'GET').toUpperCase();
+		const method = (opts.method || (args[0] instanceof Request ? args[0].method : 'GET')).toUpperCase();
 
 		// Detect generation start (completion requests)
 		if (url && method === 'POST' && (url.includes('/completion') || url.includes('/retry_completion') || url.includes('/sessions/'))) {
@@ -55,6 +55,7 @@
 		const contentType = response.headers.get('content-type') || '';
 		if (contentType.includes('event-stream')) {
 			handleEventStream(response);
+			if (method === 'POST') post('cc:stream_started', {});
 		}
 
 		// New interface: Connect stream carrying the same limit data in protobuf frames.
@@ -140,8 +141,9 @@
 					if (!raw) continue;
 					try {
 						const json = JSON.parse(raw);
-						if (json?.type === 'message_limit' && json.message_limit) {
-							post('cc:message_limit', json.message_limit);
+						const limits = json?.message_limit || (json?.type === 'message_limit' ? json : null);
+						if (limits && typeof limits === 'object') {
+							post('cc:message_limit', limits);
 						}
 					} catch {
 						// ignore

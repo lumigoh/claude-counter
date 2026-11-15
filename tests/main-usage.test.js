@@ -472,3 +472,74 @@ test('M20 reload on the other id: the account is recognised through the saved al
 	assert.equal(second.lastUsage().five_hour.utilization, 20);
 	assert.equal(second.lastUsage().seven_day.utilization, 10);
 });
+
+// #57 refresh triggers must coexist with #60's empty-answer and failure backoff.
+const usefulUsage = async () => ({ five_hour: liveWindow(20, START + 10 * HOUR), seven_day: liveWindow(10, START + 100 * HOUR) });
+
+test('M57a useful endpoint data is refreshed every five visible minutes', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
+	await env.clock.advance(5 * MIN - 1000);
+	assert.equal(env.calls.usageRequests.length, 1);
+	await env.clock.advance(1000);
+	assert.equal(env.calls.usageRequests.length, 2);
+	env.document.hidden = true;
+	await env.clock.advance(10 * MIN);
+	assert.equal(env.calls.usageRequests.length, 2);
+	env.document.hidden = false;
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 3);
+});
+
+test('M57b focus and navigation refresh stale data without duplicate requests', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
+	await env.clock.advance(MIN);
+	env.window.dispatchEvent({ type: 'focus' });
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 2);
+	env.window.dispatchEvent({ type: 'focus' });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 2);
+	await env.clock.advance(2 * MIN);
+	await env.navigate('/new');
+	assert.equal(env.calls.usageRequests.length, 3);
+});
+
+test('M57c a legacy stream schedules refreshes at 20 and 60 seconds', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
+	await env.emit('cc:stream_started', {});
+	await env.clock.advance(19000);
+	assert.equal(env.calls.usageRequests.length, 1);
+	await env.clock.advance(1000);
+	assert.equal(env.calls.usageRequests.length, 2);
+	await env.clock.advance(40000);
+	assert.equal(env.calls.usageRequests.length, 3);
+});
+
+test('M57d empty /usage answers keep the hourly cooldown across focus, navigation and stream events', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:stream_started', {});
+	await env.clock.advance(2 * MIN);
+	env.window.dispatchEvent({ type: 'focus' });
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.navigate('/new');
+	assert.equal(env.calls.usageRequests.length, 1);
+});
+
+test('M57e extra refresh events respect failure backoff and hidden tabs', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => { throw new Error('403'); } });
+	await env.clock.advance(MIN);
+	assert.equal(env.calls.usageRequests.length, 2);
+	await env.clock.advance(MIN);
+	env.window.dispatchEvent({ type: 'focus' });
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.emit('cc:stream_started', {});
+	await env.navigate('/new');
+	assert.equal(env.calls.usageRequests.length, 2);
+	env.document.hidden = true;
+	await env.clock.advance(3 * MIN);
+	env.window.dispatchEvent({ type: 'focus' });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 2);
+});

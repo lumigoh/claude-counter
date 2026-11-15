@@ -211,17 +211,18 @@ test('U15 clicking the usage line asks for a refresh', async () => {
 
 test('U08c calling attach again does not shuffle the header and the usage bars', () => {
 	const env = createUiEnv();
-	const { flow } = env.dom.buildComposer();
+	const { box } = env.dom.buildComposer();
 	env.ui.attach();
 	env.ui.setConversationMetrics({ totalTokens: 100, cachedUntil: null });
-	const order = () => Array.from(flow.parentElement.children).map((c) => (c === flow ? 'flow' : c === env.ui.headerContainer ? 'header' : c === env.ui.usageLine ? 'usage' : '?')).join(',');
-	assert.equal(order(), 'flow,header,usage');
+	const order = () => Array.from(box.parentElement.children).filter((c) => [box, env.ui.headerContainer, env.ui.usageLine].includes(c)).map((c) => c === box ? 'composer' : c === env.ui.headerContainer ? 'header' : 'usage').join(',');
+	assert.equal(order(), 'composer,header,usage');
+	assert.equal(box.contains(env.ui.usageLine), false, 'usage stays outside the composer controls');
 	for (let i = 0; i < 5; i++) {
 		env.ui.attach();
 		env.ui.attachUsageLine();
 		env.ui.tick();
 		for (const observer of env.dom.observers) observer.cb([]);
-		assert.equal(order(), 'flow,header,usage', `round ${i}`);
+		assert.equal(order(), 'composer,header,usage', `round ${i}`);
 	}
 });
 
@@ -608,4 +609,69 @@ test('U45 a page without a positioned element around the bar (the body would be 
 	env.ui.setConversationTitle('Můj rodinný rozpočet');
 	assert.equal(env.ui.headerPlacement, 'bars');
 	assert.equal(env.ui.headerContainer.style.position, '');
+});
+
+function responsiveComposer() {
+	const env = createUiEnv();
+	env.dom.buildHeader();
+	const { box, input } = env.dom.buildComposer();
+	const wrapper = env.document.createElement('div');
+	env.document.body.appendChild(wrapper);
+	wrapper.appendChild(box);
+	const chin = env.document.createElement('div');
+	chin.setAttribute('data-cds', 'ChatComposerChin');
+	wrapper.appendChild(chin);
+	const control = env.document.createElement('button');
+	chin.appendChild(control);
+	chin.getBoundingClientRect = () => ({ left: 0, right: 1000, width: 1000, height: 40 });
+	control.getBoundingClientRect = () => ({ left: 0, right: 250, width: 250, height: 30 });
+	return { ...env, box, input, chin, control, wrapper };
+}
+
+test('U57a the usage row fits beside the composer strip controls when there is room', () => {
+	const env = responsiveComposer();
+	env.ui.usageLine.getBoundingClientRect = () => ({ left: 500, right: 980, width: 480, height: 30 });
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.parentElement, env.chin);
+	assert.equal(env.ui.usageLine.classList.contains('cc-compact'), false);
+	assert.equal(env.box.contains(env.ui.usageLine), false);
+});
+
+test('U57b compact mode hides reset text before giving the row its own line', () => {
+	const env = responsiveComposer();
+	env.ui.usageLine.getBoundingClientRect = () => ({ left: env.ui.usageLine.classList.contains('cc-compact') ? 350 : 100, right: 980, width: 880, height: 30 });
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.parentElement, env.chin);
+	assert.equal(env.ui.usageLine.classList.contains('cc-compact'), true);
+});
+
+test('U57c a row that still collides in compact mode goes below the strip', () => {
+	const env = responsiveComposer();
+	env.ui.usageLine.getBoundingClientRect = () => ({ left: 100, right: 980, width: 880, height: 30 });
+	env.ui.attach();
+	assert.equal(env.chin.nextElementSibling, env.ui.usageLine);
+	assert.equal(env.ui.usageLine.classList.contains('cc-usageRow--below'), true);
+	assert.equal(env.ui._usageMisplaced(), false);
+});
+
+test('U57d page mutations repair a row that was moved inside the input card', async () => {
+	const env = responsiveComposer();
+	env.ui.usageLine.getBoundingClientRect = () => ({ left: 500, right: 980, width: 480, height: 30 });
+	env.ui.attach();
+	env.box.appendChild(env.ui.usageLine);
+	for (const observer of env.dom.observers) observer.cb([]);
+	await env.clock.advance(150);
+	assert.equal(env.ui.usageLine.parentElement, env.chin);
+});
+
+test('U57e warning colours progress from amber to red and clear for unknown/expired data', () => {
+	const env = createUiEnv();
+	for (const [pct, caution, warn] of [[74, false, false], [75, true, false], [90, false, true]]) {
+		env.ui.setUsage({ five_hour: { utilization: pct } });
+		assert.equal(env.ui.sessionBarFill.classList.contains('cc-caution'), caution);
+		assert.equal(env.ui.sessionBarFill.classList.contains('cc-warn'), warn);
+	}
+	env.ui.setUsage({ five_hour: { expired: true } });
+	assert.equal(env.ui.sessionBarFill.classList.contains('cc-caution'), false);
+	assert.equal(env.ui.sessionBarFill.classList.contains('cc-warn'), false);
 });

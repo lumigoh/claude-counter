@@ -3,6 +3,23 @@
 
 	const CC = (globalThis.ClaudeCounter = globalThis.ClaudeCounter || {});
 
+	const IS_ES = /^es\b/i.test(document.documentElement.lang || globalThis.navigator?.language || '');
+	const L = IS_ES
+		? {
+				session: 'Sesión',
+				weekly: 'Semana',
+				resetsIn: 'Se reinicia en',
+				sessionTip: 'Ventana de uso de 5 horas.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.',
+				weeklyTip: 'Ventana de uso de 7 días.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.'
+			}
+		: {
+				session: 'Session',
+				weekly: 'Weekly',
+				resetsIn: 'resets in',
+				sessionTip: '5-hour session window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.',
+				weeklyTip: '7-day usage window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.'
+			};
+
 	const USAGE_TOOLTIP_TAIL =
 		'\n0% without a countdown: the window ended and nothing was used since.\n"no data yet": the limits arrive with your next reply.';
 	const SESSION_TOOLTIP =
@@ -237,20 +254,11 @@
 
 		_observeDom() {
 			// Track pending reattach attempts independently
-			let usageReattachPending = false;
 			let headerReattachPending = false;
 
 			this.domObserver = new MutationObserver(() => {
-				const usageMissing = this.usageLine && !document.contains(this.usageLine);
+				if (this._usageMisplaced()) this._scheduleUsageReattach(150);
 				const headerMissing = !document.contains(this.headerContainer);
-
-				if (usageMissing && !usageReattachPending) {
-					usageReattachPending = true;
-					CC.waitForElement(CC.DOM.CHAT_INPUT, 60000).then((el) => {
-						usageReattachPending = false;
-						if (el) this.attachUsageLine();
-					});
-				}
 
 				if (headerMissing && !document.querySelector(CC.DOM.CHAT_HEADER_ANCHOR)) {
 					this._mountHeaderFallback();
@@ -281,49 +289,43 @@
 
 		_initUsageLine() {
 			this.usageLine = document.createElement('div');
-			this.usageLine.className =
-				'text-text-400 text-[11px] cc-usageRow flex flex-row items-center gap-3 w-full';
-
-			this.sessionUsageSpan = document.createElement('span');
-			this.sessionUsageSpan.className = 'cc-usageText';
-			this.sessionUsageSpan.textContent = 'Session: no data yet';
-
-			this.sessionBar = document.createElement('div');
-			this.sessionBar.className = 'cc-bar cc-bar--usage';
-			this.sessionBarFill = document.createElement('div');
-			this.sessionBarFill.className = 'cc-bar__fill';
-			this.sessionMarker = document.createElement('div');
-			this.sessionMarker.className = 'cc-bar__marker cc-hidden';
-			this.sessionMarker.style.left = '0%';
-			this.sessionBar.appendChild(this.sessionBarFill);
-			this.sessionBar.appendChild(this.sessionMarker);
-
-			this.weeklyUsageSpan = document.createElement('span');
-			this.weeklyUsageSpan.className = 'cc-usageText';
-			this.weeklyUsageSpan.textContent = 'Weekly: no data yet';
-
-			this.weeklyBar = document.createElement('div');
-			this.weeklyBar.className = 'cc-bar cc-bar--usage';
-			this.weeklyBarFill = document.createElement('div');
-			this.weeklyBarFill.className = 'cc-bar__fill';
-			this.weeklyMarker = document.createElement('div');
-			this.weeklyMarker.className = 'cc-bar__marker cc-hidden';
-			this.weeklyMarker.style.left = '0%';
-			this.weeklyBar.appendChild(this.weeklyBarFill);
-			this.weeklyBar.appendChild(this.weeklyMarker);
-
-			this.sessionGroup = document.createElement('div');
-			this.sessionGroup.className = 'cc-usageGroup';
-			this.sessionGroup.appendChild(this.sessionUsageSpan);
-			this.sessionGroup.appendChild(this.sessionBar);
-
-			this.weeklyGroup = document.createElement('div');
-			this.weeklyGroup.className = 'cc-usageGroup cc-usageGroup--weekly';
-			this.weeklyGroup.appendChild(this.weeklyBar);
-			this.weeklyGroup.appendChild(this.weeklyUsageSpan);
-
-			this.usageLine.appendChild(this.sessionGroup);
-			this.usageLine.appendChild(this.weeklyGroup);
+			this.usageLine.className = 'cc-usageRow';
+			const makeGroup = (label) => {
+				const group = document.createElement('div');
+				group.className = 'cc-usageGroup';
+				const span = document.createElement('span');
+				span.className = 'cc-usageText';
+				const labelEl = document.createElement('span');
+				labelEl.className = 'cc-usageLabel';
+				labelEl.textContent = `${label}: `;
+				const bar = document.createElement('div');
+				bar.className = 'cc-bar cc-bar--usage';
+				const fill = document.createElement('div');
+				fill.className = 'cc-bar__fill';
+				const marker = document.createElement('div');
+				marker.className = 'cc-bar__marker cc-hidden';
+				bar.appendChild(fill);
+				bar.appendChild(marker);
+				const pct = document.createElement('span');
+				pct.className = 'cc-usagePct';
+				pct.textContent = 'no data yet';
+				const reset = document.createElement('span');
+				reset.className = 'cc-usageReset';
+				for (const el of [labelEl, bar, pct, reset]) span.appendChild(el);
+				group.appendChild(span);
+				return { group, span, bar, fill, marker, pct, reset };
+			};
+			for (const [key, label] of [['session', L.session], ['weekly', L.weekly]]) {
+				const g = makeGroup(label);
+				this[`${key}Group`] = g.group;
+				this[`${key}UsageSpan`] = g.span;
+				this[`${key}Bar`] = g.bar;
+				this[`${key}BarFill`] = g.fill;
+				this[`${key}Marker`] = g.marker;
+				this[`${key}PctSpan`] = g.pct;
+				this[`${key}ResetSpan`] = g.reset;
+				this.usageLine.appendChild(g.group);
+			}
 
 			this.refreshProgressChrome();
 
@@ -406,6 +408,7 @@
 		_mountHeaderAboveBars() {
 			const line = this.usageLine;
 			if (!line || !line.parentElement || !this.headerContainer) return false;
+			if (this._usageMode === 'chin') this._placeUsage(this._usageAnchor, this._usageChin, 'afterChin');
 			if (line.previousElementSibling !== this.headerContainer) line.before(this.headerContainer);
 			this._resetHeaderStyle();
 			this.headerContainer.style.paddingLeft = '12px';
@@ -643,101 +646,121 @@
 
 		_attachUsageLine() {
 			if (!this.usageLine) return;
+			const box = this._findComposerBox();
+			if (!box || !box.parentElement) return;
+			this._usageAnchor = box;
+			const chin = this._findChin(box);
+			this._placeUsage(box, chin, chin ? 'chin' : 'below');
+			this._fitUsage();
+			this._observeFit();
+			if (this.headerPlacement === 'bars') this._mountHeaderAboveBars();
+			this.refreshProgressChrome();
+		}
 
-			// Primary approach (redesigned composer): Resolve from the chat input element
-			// The chat input exists on both home view and active conversation views.
-			const chatInput = document.querySelector(CC.DOM.CHAT_INPUT || '[data-testid="chat-input"], div[contenteditable="true"], textarea');
-			if (chatInput) {
-				// The input lives inside a flow child inside .bg-surface-3:
-				// .bg-surface-3 > .relative.w-full.min-w-0
-				const composerFlowChild = chatInput.closest('.bg-surface-3 > .relative.w-full.min-w-0') ||
-				                          chatInput.closest('.relative.w-full.min-w-0');
+		_findChin(box) {
+			let next = box.nextElementSibling;
+			while (next && (next === this.usageLine || next === this.headerContainer)) next = next.nextElementSibling;
+			if (!next || box.parentElement === document.body) return null;
+			const style = window.getComputedStyle(next);
+			if (style.display === 'none' || style.position === 'absolute' || style.position === 'fixed') return null;
+			const h = next.getBoundingClientRect().height;
+			return h >= 20 && h <= 90 ? next : null;
+		}
 
-				if (composerFlowChild && composerFlowChild.parentElement) {
-					if (!this._followsComposer(composerFlowChild)) {
-						composerFlowChild.after(this.usageLine);
-					}
-					this.usageLine.style.paddingLeft = '12px';
-					this.usageLine.style.paddingRight = '12px';
-					this.usageLine.style.paddingBottom = '4px';
-					this.refreshProgressChrome();
-					return;
-				}
-
-				// If flow child structure differs, mount inside the composer box container
-				const composerBox = chatInput.closest('.bg-surface-3') ||
-				                    chatInput.closest('[data-cds="ChatComposer"]') ||
-				                    chatInput.closest('fieldset') ||
-				                    chatInput.closest('form');
-
-				if (composerBox) {
-					const targetBox = composerBox.querySelector(':scope > .bg-surface-3') || composerBox;
-					if (targetBox && targetBox.lastElementChild !== this.usageLine) {
-						targetBox.appendChild(this.usageLine);
-					}
-					this.usageLine.style.paddingLeft = '12px';
-					this.usageLine.style.paddingRight = '12px';
-					this.usageLine.style.paddingBottom = '4px';
-					this.refreshProgressChrome();
-					return;
-				}
+		_placeUsage(box, chin, mode) {
+			const row = this.usageLine;
+			row.classList.toggle('cc-usageRow--chin', mode === 'chin');
+			row.classList.toggle('cc-usageRow--below', mode !== 'chin');
+			if (mode === 'chin') {
+				if (window.getComputedStyle(chin).position === 'static' || !window.getComputedStyle(chin).position) chin.classList.add('cc-usageHost');
+				if (row.parentElement !== chin) chin.appendChild(row);
+				this._usageParent = chin;
+			} else {
+				const after = mode === 'afterChin' && chin ? chin : box;
+				if (!this._followsComposer(after)) after.after(row);
+				this._usageAfter = after;
+				this._usageParent = after.parentElement;
 			}
+			this._usageMode = mode;
+			this._usageChin = chin;
+		}
 
-			// Fallback approach: model selector dropdown
-			const modelSelector = document.querySelector(CC.DOM.MODEL_SELECTOR_DROPDOWN);
-			if (modelSelector) {
-				const composer =
-					modelSelector.closest(CC.DOM.COMPOSER) ||
-					document.querySelector(CC.DOM.COMPOSER);
-				if (composer) {
-					const box = composer.querySelector(':scope > .bg-surface-3') || composer.firstElementChild;
-					if (box && box.lastElementChild !== this.usageLine) {
-						box.appendChild(this.usageLine);
-					}
-					this.usageLine.style.paddingLeft = '12px';
-					this.usageLine.style.paddingRight = '12px';
-					this.usageLine.style.paddingBottom = '4px';
-					this.refreshProgressChrome();
-					return;
-				}
+		// Make sure the row never collides with claude.ai's own chin content.
+		_fitUsage() {
+			const row = this.usageLine;
+			if (!row || !this._usageAnchor?.isConnected || row.classList.contains('cc-hidden')) return;
+			const box = this._usageAnchor;
+			const chin = this._usageChin;
+			row.classList.remove('cc-compact');
 
-				const gridContainer = modelSelector.closest('[data-testid="chat-input-grid-container"]');
-				const gridArea = modelSelector.closest('[data-testid="chat-input-grid-area"]');
-				const findToolbarRow = (el, stopAt) => {
-					let cur = el;
-					while (cur && cur !== document.body) {
-						if (stopAt && cur === stopAt) break;
-						if (cur !== el && cur.nodeType === 1) {
-							const style = window.getComputedStyle(cur);
-							if (style.display === 'flex' && style.flexDirection === 'row') {
-								const buttons = cur.querySelectorAll('button').length;
-								if (buttons > 1) return cur;
-							}
-						}
-						cur = cur.parentElement;
-					}
-					return null;
-				};
-
-				const toolbarRow =
-					(gridContainer ? findToolbarRow(modelSelector, gridArea || gridContainer) : null) ||
-					findToolbarRow(modelSelector) ||
-					modelSelector.parentElement?.parentElement?.parentElement;
-				if (toolbarRow && toolbarRow.nextElementSibling !== this.usageLine) {
-					toolbarRow.after(this.usageLine);
-					this.refreshProgressChrome();
-					return;
-				}
+			if (!chin || this.headerPlacement === 'bars') {
+				this._placeUsage(box, chin, chin ? 'afterChin' : 'below');
+				return;
 			}
+			if (this._usageMode !== 'chin') this._placeUsage(box, chin, 'chin');
 
-			// Last resort fallback: input's immediate parent
-			if (chatInput && chatInput.parentElement) {
-				const parent = chatInput.closest('.flex-col') || chatInput.parentElement;
-				if (parent && parent.lastElementChild !== this.usageLine) {
-					parent.appendChild(this.usageLine);
-					this.refreshProgressChrome();
+			const collides = () => {
+				const rr = row.getBoundingClientRect();
+				let rightmost = chin.getBoundingClientRect().left;
+				for (const el of chin.querySelectorAll('button, a, [role="tab"], [role="button"]')) {
+					if (row.contains(el)) continue;
+					const r = el.getBoundingClientRect();
+					if (r.width && r.height) rightmost = Math.max(rightmost, r.right);
 				}
+				return rr.left < rightmost + 16 || rr.right > chin.getBoundingClientRect().right;
+			};
+
+			if (!collides()) return;
+			row.classList.add('cc-compact');
+			if (!collides()) return;
+			row.classList.remove('cc-compact');
+			this._placeUsage(box, chin, 'afterChin');
+		}
+
+		_observeFit() {
+			if (this._fitBox === this._usageAnchor && this._fitChin === this._usageChin) return;
+			if (this._fitObserver) this._fitObserver.disconnect();
+			this._fitBox = this._usageAnchor;
+			this._fitChin = this._usageChin;
+			if (!('ResizeObserver' in window) || !this._usageAnchor) return;
+			let raf = 0;
+			this._fitObserver = new ResizeObserver(() => {
+				cancelAnimationFrame(raf);
+				raf = requestAnimationFrame(() => this._fitUsage());
+			});
+			this._fitObserver.observe(this._usageAnchor);
+			if (this._usageChin) this._fitObserver.observe(this._usageChin);
+		}
+
+		_scheduleUsageReattach(delay = 200) {
+			if (this._usageReattachTimer) return;
+			this._usageReattachTimer = setTimeout(() => {
+				this._usageReattachTimer = null;
+				this.attachUsageLine();
+			}, delay);
+		}
+
+		_usageMisplaced() {
+			const input = document.querySelector(CC.DOM.CHAT_INPUT);
+			if (!input || !this.usageLine) return false;
+			if (!document.contains(this.usageLine) || !this._usageAnchor?.contains(input)) return true;
+			if (this.usageLine.parentElement !== this._usageParent) return true;
+			if (this._usageMode === 'chin') return this._findChin(this._usageAnchor) !== this._usageChin;
+			if (!this._followsComposer(this._usageAfter)) return true;
+			return this._usageMode === 'below' && !!this._findChin(this._usageAnchor);
+		}
+
+		_findComposerBox() {
+			const editor = document.querySelector(CC.DOM.CHAT_INPUT);
+			if (!editor) return null;
+			for (let el = editor.parentElement; el && el !== document.body; el = el.parentElement) {
+				const s = window.getComputedStyle(el);
+				const radius = parseFloat(s.borderTopLeftRadius) || 0;
+				const hasBg = s.backgroundColor && s.backgroundColor !== 'transparent' && s.backgroundColor !== 'rgba(0, 0, 0, 0)';
+				if (el.matches('.bg-surface-3') || (radius >= 8 && (hasBg || parseFloat(s.borderTopWidth) > 0 || (s.boxShadow && s.boxShadow !== 'none')))) return el;
+				if (el.matches('fieldset, form')) return el;
 			}
+			return editor.parentElement && editor.parentElement !== document.body ? editor.parentElement : null;
 		}
 
 		setPendingCache(pending) {
@@ -925,26 +948,32 @@
 		 *  - expired { expired: true }: the reset time passed, nothing used since: 0%, no countdown
 		 *  - unknown (null): no data yet, e.g. the free plan reports usage only with the first reply
 		 */
-		_renderWindow({ label, windowMs, w, span, fill }) {
+		_renderWindow({ windowMs, w, pctSpan, resetSpan, fill }) {
 			const live = w && !w.expired && typeof w.utilization === 'number';
 
 			if (live) {
 				const rawPct = w.utilization;
 				const pct = Math.round(rawPct * 10) / 10;
 				const resetMs = w.resets_at ? Date.parse(w.resets_at) : null;
-				const resetText = resetMs ? ` · resets in ${formatResetCountdown(resetMs)}` : '';
-				span.textContent = `${label}: ${pct}%${resetText}`;
+				pctSpan.textContent = `${pct}%`;
+				resetSpan.textContent = resetMs ? ` · ${L.resetsIn} ${formatResetCountdown(resetMs)}` : '';
+				resetSpan.title = resetMs ? new Date(resetMs).toLocaleString() : '';
+				pctSpan.title = resetSpan.title;
 
 				const width = Math.max(0, Math.min(100, rawPct));
 				fill.style.width = `${width}%`;
+				fill.classList.toggle('cc-caution', width >= 75 && width < 90);
 				fill.classList.toggle('cc-warn', width >= 90);
 				fill.classList.toggle('cc-full', width >= 99.5);
 				return { resetMs, startMs: resetMs ? resetMs - windowMs : null, pct, live: true };
 			}
 
-			span.textContent = w && w.expired ? `${label}: 0%` : `${label}: no data yet`;
+			pctSpan.textContent = w && w.expired ? '0%' : 'no data yet';
+			resetSpan.textContent = '';
+			resetSpan.title = '';
+			pctSpan.title = '';
 			fill.style.width = '0%';
-			fill.classList.remove('cc-warn', 'cc-full');
+			fill.classList.remove('cc-caution', 'cc-warn', 'cc-full');
 			return { resetMs: null, startMs: null, pct: 0, live: false };
 		}
 
@@ -962,7 +991,8 @@
 				label: 'Session',
 				windowMs: 5 * 60 * 60 * 1000,
 				w: usage?.five_hour || null,
-				span: this.sessionUsageSpan,
+				pctSpan: this.sessionPctSpan,
+				resetSpan: this.sessionResetSpan,
 				fill: this.sessionBarFill
 			});
 			this.sessionResetMs = session.resetMs;
@@ -973,13 +1003,15 @@
 				label: 'Weekly',
 				windowMs: 7 * 24 * 60 * 60 * 1000,
 				w: usage?.seven_day || null,
-				span: this.weeklyUsageSpan,
+				pctSpan: this.weeklyPctSpan,
+				resetSpan: this.weeklyResetSpan,
 				fill: this.weeklyBarFill
 			});
 			this.weeklyResetMs = weekly.resetMs;
 			this.weeklyWindowStartMs = weekly.startMs;
 
 			this._updateMarkers();
+			this._fitUsage();
 		}
 
 		_updateMarkers() {
@@ -1029,21 +1061,10 @@
 				this._renderHeader();
 			}
 
-			// Reset countdown text + time markers
-			if (this.sessionResetMs && this.sessionUsageSpan?.textContent) {
-				const idx = this.sessionUsageSpan.textContent.indexOf('· resets in');
-				if (idx !== -1) {
-					const prefix = this.sessionUsageSpan.textContent.slice(0, idx + '· resets in '.length);
-					this.sessionUsageSpan.textContent = `${prefix}${formatResetCountdown(this.sessionResetMs)}`;
-				}
-			}
-
-			if (this.weeklyResetMs && this.weeklyUsageSpan?.textContent) {
-				const idx = this.weeklyUsageSpan.textContent.indexOf('· resets in');
-				if (idx !== -1) {
-					const prefix = this.weeklyUsageSpan.textContent.slice(0, idx + '· resets in '.length);
-					this.weeklyUsageSpan.textContent = `${prefix}${formatResetCountdown(this.weeklyResetMs)}`;
-				}
+			// Reset text is separate so compact mode can hide it without parsing labels.
+			for (const key of ['session', 'weekly']) {
+				const resetMs = this[`${key}ResetMs`];
+				if (resetMs) this[`${key}ResetSpan`].textContent = ` · ${L.resetsIn} ${formatResetCountdown(resetMs)}`;
 			}
 
 			this._updateMarkers();

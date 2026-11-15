@@ -6,6 +6,10 @@ A minimal browser extension that shows token count, cache timer, and usage bars 
 
 > Fork of [she-llac/claude-counter](https://github.com/she-llac/claude-counter) v0.4.2, updated for the claude.ai UI redesign (August 2026, 2.0.x) and for the new unified claude.ai interface (October 2026, 2.1.0).
 
+## Personal build 2.1.1
+
+Includes upstream #60 and #15, plus the responsive composer layout and usage refresh improvements adapted from [#57](https://github.com/she-llac/claude-counter/pull/57). Stream support and empty-answer/failure backoff are preserved. See the [changelog](CHANGELOG.md).
+
 ## Features
 
 - **Token count** — Approximate token count for the current conversation, with a mini progress bar against the 200k context limit
@@ -52,7 +56,7 @@ The update for the August 2026 claude.ai redesign, by [hey-naf](https://github.c
 
 **Chrome / Edge / Chromium 111 or newer**
 
-1. Download the zip of the latest version from [Releases](../../releases) and unzip it
+1. Download this fork using **Code → Download ZIP** and unzip it (or clone the repository)
 2. Go to `chrome://extensions` and enable **Developer mode**
 3. Click **Load unpacked** and choose the unzipped folder (the one with `manifest.json`)
 

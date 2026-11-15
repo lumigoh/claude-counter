@@ -2,6 +2,20 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.1] - 2026-11-15
+
+### Changed
+- Adapted [upstream PR #57](https://github.com/she-llac/claude-counter/pull/57) by cikel87 onto the personal build containing #60 and #15.
+- Usage bars sit outside the input card, beside the composer strip when space permits. On narrower layouts they hide reset text, then move to a separate wrapping line. DOM and resize observers repair placement as Claude moves its controls.
+- Slim usage bars turn amber at 75% and red at 90%; labels follow English/Spanish page language. Reset timestamps remain available on percentage tooltips in compact mode.
+- Useful `/usage` data refreshes every five visible minutes, on stale focus/visibility/navigation, and 20/60 seconds after a legacy response stream starts. Empty answers retain the hourly cooldown and failed requests retain exponential backoff.
+- Fetch interception reads methods from `Request` objects and accepts top-level SSE limits. The existing early MAIN-world bridge, Connect stream support, unknown/expired states, token/cache fallback and hidden-tab UI guard are preserved.
+- Extension version bumped to 2.1.1; the userscript remains unchanged.
+
+### Validation
+- 132 automated tests pass, including regressions for refresh/backoff interactions, responsive placement, warning levels and Request/SSE handling.
+- Chromium smoke checks against a simulated composer at 1280, 900, 620 and 360 pixels, English/Spanish labels, resizing, relocated model selectors and missing-header fallback. These checks do not use a signed-in claude.ai account.
+
 ## [2.1.0] - 2026-10-24
 
 ### Added

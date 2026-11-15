@@ -11,6 +11,7 @@ const { createFakeChrome } = require('./fake-chrome');
 const SRC = path.join(__dirname, '../../src');
 
 function createFakeDocument() {
+	const listeners = {};
 	const documentElement = { dataset: {} };
 	return {
 		documentElement,
@@ -22,7 +23,8 @@ function createFakeDocument() {
 		querySelector: () => null,
 		querySelectorAll: () => [],
 		createElement: () => ({ style: {}, classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, appendChild() {}, addEventListener() {} }),
-		addEventListener() {}
+		addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+		dispatchEvent(event) { for (const fn of listeners[event.type] || []) fn(event); }
 	};
 }
 
