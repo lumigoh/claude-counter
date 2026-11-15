@@ -2,6 +2,15 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.5] - 2026-11-15
+
+### Added
+- A soft 40px fade above the quota row in ongoing chats. It blends transcript text into the chat backdrop before the composer edge, leaving quota text and controls sharp.
+- The fade is rendered outside the composer's clipping containers, follows scrolling/resizing/editor growth and theme changes, and does not intercept pointer input. It hides on non-chat pages or when the quota row is offscreen.
+- Fixed initial-load placement: quota width follows the input card rather than a page-wide parent. Bars wait for a visible composer card, ignore loading placeholders/hidden previous editors, and reattach after hydration even when the input node stays the same. Attribute changes and periodic checks catch missing/hidden rows without requiring another chat navigation.
+- Rebuilt the userscript with the same visual change. This changes the visual transition; transcript scroll clearance is unchanged.
+- Validation: 88 automated tests pass, plus Chromium checks for fade bounds/theme/pointer passthrough and loading-to-hydrated composer transitions, including a constrained card inside a wide parent. Browser checks use simulated Claude pages.
+
 ## [2.1.4] - 2026-11-15
 
 ### Removed

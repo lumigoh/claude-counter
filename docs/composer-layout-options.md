@@ -2,7 +2,7 @@
 
 The screenshot suggests the floating composer covers the final lines of a response. Adding our rows above the input increases the floating region's height, while Claude may still reserve only the space required by its original composer. This is a likely cause; the exact scroll-container structure needs checking on the affected page.
 
-Removing the token summary reduces the height immediately. The following layout changes are proposals, not part of the feature-removal release.
+Removing the token summary reduces the height immediately. Version 2.1.5 adds a 40px visual fade above the quota row to soften the transition; it does not alter transcript scroll clearance. The following layout changes remain proposals.
 
 ## Recommended: reserve the actual composer height
 

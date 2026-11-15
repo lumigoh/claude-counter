@@ -1,3 +1,13 @@
+/* A portal above the floating composer softens the transcript's hard cut-off.
+   It ends before the usage row and never receives clicks, drags or scrolling. */
+.cc-composerFade {
+	position: fixed;
+	z-index: 30;
+	display: none;
+	pointer-events: none;
+	user-select: none;
+}
+
 /* Usage stays above the composer, clear of its menus and the viewport edge. */
 .cc-usageRow {
 	--cc-text: hsl(var(--text-500, 40 3% 47%));
@@ -32,7 +42,8 @@
 	grid-column: 1 / -1;
 	flex: 0 0 auto;
 	padding: 4px 12px;
-	margin: 0 0 8px;
+	margin: 0 auto 8px;
+	max-width: 100%;
 }
 
 .cc-usageRow--dim {
@@ -191,7 +202,7 @@
 }
 
 /* Hide optional elements completely (no layout space) */
-.cc-hidden {
+.cc-hidden, .cc-unmounted {
 	display: none !important;
 }
 

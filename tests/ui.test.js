@@ -172,3 +172,74 @@ test('U48 session history labels actual readings without inventing a zero baseli
 	env.ui.setUsage({ five_hour: { utilization: 45, resets_at } });
 	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 40% → 45%/);
 });
+
+test('U49 loading placeholders never mount bars against a page-wide container', () => {
+	const env = createUiEnv();
+	const input = env.document.createElement('textarea');
+	env.document.body.appendChild(input);
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.isConnected, false);
+	assert.equal(env.ui.usageLine.classList.contains('cc-unmounted'), true);
+});
+
+test('U50 hydration of the same input attaches bars when its card styling appears', async () => {
+	const env = createUiEnv();
+	const box = env.document.createElement('div');
+	const input = env.document.createElement('div');
+	input.setAttribute('data-testid', 'chat-input');
+	box.appendChild(input);
+	env.document.body.appendChild(box);
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.isConnected, false);
+	box.className = 'bg-surface-3';
+	for (const observer of env.dom.observers) observer.cb([]);
+	await env.clock.advance(150);
+	assert.equal(env.ui.usageLine.nextElementSibling, box);
+	assert.equal(env.ui.usageLine.classList.contains('cc-unmounted'), false);
+});
+
+test('U51 a hidden old composer does not steal bars from the active chat', () => {
+	const env = createUiEnv();
+	const old = env.dom.buildComposer();
+	env.ui.attach();
+	old.box.hidden = true;
+	const current = env.dom.buildComposer();
+	env.ui.tick();
+	assert.equal(env.ui.usageLine.nextElementSibling, current.box);
+	assert.notEqual(env.ui.usageLine.nextElementSibling, old.box);
+});
+
+test('U52 a replacement composer recovers after the loading view removes the old one', async () => {
+	const env = createUiEnv();
+	const old = env.dom.buildComposer();
+	env.ui.attach();
+	old.box.remove();
+	for (const observer of env.dom.observers) observer.cb([]);
+	await env.clock.advance(150);
+	assert.equal(env.ui.usageLine.classList.contains('cc-unmounted'), true);
+	const current = env.dom.buildComposer();
+	for (const observer of env.dom.observers) observer.cb([]);
+	await env.clock.advance(150);
+	assert.equal(env.ui.usageLine.nextElementSibling, current.box);
+	assert.equal(env.ui.usageLine.classList.contains('cc-unmounted'), false);
+});
+
+test('U53 quota width follows the input card rather than a page-wide parent', () => {
+	const env = createUiEnv();
+	const { box } = env.dom.buildComposer();
+	box.getBoundingClientRect = () => ({ left: 200, top: 500, width: 640, height: 100, right: 840, bottom: 600 });
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.style.width, '640px');
+	box.getBoundingClientRect = () => ({ left: 200, top: 500, width: 400, height: 100, right: 600, bottom: 600 });
+	env.ui.tick();
+	assert.equal(env.ui.usageLine.style.width, '400px');
+});
+
+test('U54 an offscreen previous editor cannot win over the visible chat', () => {
+	const env = createUiEnv();
+	const old = env.dom.buildComposer();
+	old.input.getBoundingClientRect = () => ({ left: -500, top: 0, width: 100, height: 20, right: -400, bottom: 20 });
+	const current = env.dom.buildComposer();
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.nextElementSibling, current.box);
+});

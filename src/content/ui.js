@@ -167,23 +167,96 @@
 			this._setupTooltips();
 			this._observeDom();
 			this._observeTheme();
+			this._initComposerFade();
 		}
 
 		_observeTheme() {
 			// Watch for theme changes (data-mode attribute on <html>)
-			const observer = new MutationObserver(() => this.refreshProgressChrome());
+			const observer = new MutationObserver(() => {
+				this.refreshProgressChrome();
+				this._syncComposerFade();
+			});
 			observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-mode'] });
 		}
 
+		_initComposerFade() {
+			this.composerFade = document.createElement('div');
+			this.composerFade.className = 'cc-composerFade';
+			this.composerFade.setAttribute('aria-hidden', 'true');
+			const schedule = () => {
+				if (this._fadeFrame) return;
+				this._fadeFrame = window.requestAnimationFrame(() => {
+					this._fadeFrame = null;
+					this._syncComposerFade();
+				});
+			};
+			window.addEventListener('scroll', schedule, true);
+			window.addEventListener('resize', schedule);
+			window.visualViewport?.addEventListener('resize', schedule);
+			window.visualViewport?.addEventListener('scroll', schedule);
+			if (window.ResizeObserver) this._fadeObserver = new window.ResizeObserver(schedule);
+			this._syncComposerFade();
+		}
+
+		_syncUsageWidth() {
+			if (!this._usageAnchor?.isConnected || !this.usageLine?.isConnected) return;
+			const width = this._usageAnchor.getBoundingClientRect().width;
+			if (width > 0 && this.usageLine.style.width !== `${width}px`) this.usageLine.style.width = `${width}px`;
+		}
+
+		_syncComposerFade() {
+			this._syncUsageWidth();
+			const fade = this.composerFade;
+			if (!fade) return;
+			const row = this.usageLine;
+			const isChat = /\/chat\/[^/]+/.test(window.location?.pathname || '');
+			if (!isChat || !row?.isConnected || !row.getClientRects().length) {
+				fade.style.display = 'none';
+				return;
+			}
+			const rect = row.getBoundingClientRect();
+			if (rect.top <= 0 || rect.top >= window.innerHeight || rect.right <= 0 || rect.left >= window.innerWidth) {
+				fade.style.display = 'none';
+				return;
+			}
+			// Portal outside the composer: its overflow must not cut off the gradient itself.
+			if (!fade.isConnected) (document.body || document.documentElement).appendChild(fade);
+			if (this._fadeAnchor !== this._usageAnchor) {
+				this._fadeObserver?.disconnect();
+				this._fadeAnchor = this._usageAnchor;
+				this._fadeObserver?.observe(row);
+				if (this._usageAnchor) this._fadeObserver?.observe(this._usageAnchor);
+				if (row.parentElement) this._fadeObserver?.observe(row.parentElement);
+			}
+			// Match the opaque chat backdrop rather than the lighter input-card colour.
+			let background = document.documentElement.dataset?.mode === 'dark' ? '#191919' : '#faf9f5';
+			for (let el = row.parentElement; el; el = el.parentElement) {
+				const color = window.getComputedStyle(el).backgroundColor;
+				if (color && color !== 'transparent' && !/^rgba\(.*,[\s]*0(?:\.\d+)?\)$/.test(color)) {
+					background = color;
+					break;
+				}
+			}
+			const top = Math.max(0, rect.top - 40);
+			const left = Math.max(0, rect.left);
+			fade.style.display = 'block';
+			fade.style.left = `${left}px`;
+			fade.style.top = `${top}px`;
+			fade.style.width = `${Math.min(window.innerWidth, rect.right) - left}px`;
+			fade.style.height = `${rect.top - top}px`;
+			fade.style.backgroundImage = `linear-gradient(to bottom, transparent, ${background})`;
+		}
+
 		_observeDom() {
-			this.domObserver = new MutationObserver(() => {
+			this.domObserver = new MutationObserver((records) => {
+				if (records.length && records.every((r) => r.target?.closest?.('.cc-usageRow, .cc-tooltip, .cc-composerFade'))) return;
 				if (this._usageMisplaced()) this._scheduleUsageReattach(150);
 			});
 
 			const startObserving = () => {
 				const target = document.body || document.documentElement;
 				if (target) {
-					this.domObserver.observe(target, { childList: true, subtree: true });
+					this.domObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'data-testid', 'contenteditable', 'inert'] });
 				}
 			};
 
@@ -196,7 +269,7 @@
 
 		_initUsageLine() {
 			this.usageLine = document.createElement('div');
-			this.usageLine.className = 'cc-usageRow';
+			this.usageLine.className = 'cc-usageRow cc-unmounted';
 			const makeGroup = (label) => {
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
@@ -278,10 +351,17 @@
 		_attachUsageLine() {
 			if (!this.usageLine) return;
 			const box = this._findComposerBox();
-			if (!box || !box.parentElement) return;
+			if (!box || !box.parentElement) {
+				this.usageLine.classList.add('cc-unmounted');
+				this._usageAnchor = null;
+				this._syncComposerFade();
+				return;
+			}
 			this._usageAnchor = box;
+			this.usageLine.classList.remove('cc-unmounted');
 			this.usageLine.classList.add('cc-usageRow--above');
 			if (this.usageLine.nextElementSibling !== box) box.before(this.usageLine);
+			this._syncComposerFade();
 			this.refreshProgressChrome();
 		}
 
@@ -294,22 +374,36 @@
 		}
 
 		_usageMisplaced() {
-			const input = document.querySelector(CC.DOM.CHAT_INPUT);
-			if (!input || !this.usageLine) return false;
-			return !document.contains(this.usageLine) || !this._usageAnchor?.contains(input) || this.usageLine.nextElementSibling !== this._usageAnchor;
+			if (!this.usageLine) return false;
+			const box = this._findComposerBox();
+			if (!box) return !this.usageLine.classList.contains('cc-unmounted');
+			return this.usageLine.classList.contains('cc-unmounted') || !document.contains(this.usageLine) || this._usageAnchor !== box || this.usageLine.nextElementSibling !== box;
 		}
 
 		_findComposerBox() {
-			const editor = document.querySelector(CC.DOM.CHAT_INPUT);
-			if (!editor) return null;
-			for (let el = editor.parentElement; el && el !== document.body; el = el.parentElement) {
-				const s = window.getComputedStyle(el);
-				const radius = parseFloat(s.borderTopLeftRadius) || 0;
-				const hasBg = s.backgroundColor && s.backgroundColor !== 'transparent' && s.backgroundColor !== 'rgba(0, 0, 0, 0)';
-				if (el.matches('.bg-surface-3') || (radius >= 8 && (hasBg || parseFloat(s.borderTopWidth) > 0 || (s.boxShadow && s.boxShadow !== 'none')))) return el;
-				if (el.matches('fieldset, form')) return el;
+			// Loading placeholders and hidden, previous composers must never win discovery.
+			const selectors = ['[data-testid="chat-input"]', '.ProseMirror[contenteditable="true"]', 'div[contenteditable="true"]', 'textarea'];
+			const seen = new Set();
+			for (const selector of selectors) {
+				for (const editor of document.querySelectorAll(selector)) {
+					if (seen.has(editor)) continue;
+					seen.add(editor);
+					if (!editor.getClientRects().length || editor.closest('[role="dialog"], [aria-hidden="true"], [inert], aside, nav, header')) continue;
+					const bounds = editor.getBoundingClientRect();
+					if (!bounds.width || !bounds.height || bounds.bottom <= 0 || bounds.top >= window.innerHeight || bounds.right <= 0 || bounds.left >= window.innerWidth) continue;
+					const editorStyle = window.getComputedStyle(editor);
+					if (editorStyle.visibility === 'hidden' || editorStyle.display === 'none') continue;
+					for (let el = editor.parentElement; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+						if (el.matches('main, aside, nav, header')) break;
+						const style = window.getComputedStyle(el);
+						if (!el.getClientRects().length || style.visibility === 'hidden' || style.display === 'none') break;
+						const radius = parseFloat(style.borderTopLeftRadius) || 0;
+						const hasBg = style.backgroundColor && style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
+						if (el.matches('.bg-surface-3') || (radius >= 8 && (hasBg || parseFloat(style.borderTopWidth) > 0 || (style.boxShadow && style.boxShadow !== 'none')))) return el;
+					}
+				}
 			}
-			return editor.parentElement && editor.parentElement !== document.body ? editor.parentElement : null;
+			return null;
 		}
 
 		_usageTooltipText(key) {
@@ -483,6 +577,8 @@
 		}
 
 		tick() {
+			if (this._usageMisplaced()) this.attachUsageLine();
+			this._syncComposerFade();
 			// Reset text is separate so compact mode can hide it without parsing labels.
 			for (const key of ['session', 'weekly']) {
 				const resetMs = this[`${key}ResetMs`];

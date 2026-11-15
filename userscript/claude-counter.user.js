@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Counter
 // @namespace    https://github.com/she-llac/claude-counter
-// @version      2.1.4
+// @version      2.1.5
 // @description  Shows session and weekly usage bars on claude.ai.
 // @homepageURL  https://github.com/lumigoh/claude-counter
 // @downloadURL  https://raw.githubusercontent.com/lumigoh/claude-counter/main/userscript/claude-counter.user.js
@@ -740,7 +740,7 @@ const chrome = (() => {
 function start() {
 	const style = document.createElement('style');
 	style.id = 'cc-userscript-styles';
-	style.textContent = "/* Usage stays above the composer, clear of its menus and the viewport edge. */\n.cc-usageRow {\n\t--cc-text: hsl(var(--text-500, 40 3% 47%));\n\t--cc-text-strong: hsl(var(--text-300, 40 5% 30%));\n\tdisplay: flex;\n\talign-items: center;\n\tgap: 18px;\n\tfont-family: inherit;\n\tfont-size: 12px;\n\tline-height: 16px;\n\tletter-spacing: 0.01em;\n\tfont-variant-numeric: tabular-nums;\n\tcolor: var(--cc-text);\n\tcursor: pointer;\n\tuser-select: none;\n\ttransition: opacity 150ms ease;\n\twhite-space: nowrap;\n}\n\n.cc-usageRow:hover {\n\t--cc-text: hsl(var(--text-400, 40 3% 40%));\n}\n\n/* Normal flow reserves room instead of covering the editor or its controls. */\n.cc-usageRow--above {\n\tbox-sizing: border-box;\n\tjustify-content: flex-end;\n\tflex-wrap: wrap;\n\trow-gap: 6px;\n\twidth: 100%;\n\tmin-width: 0;\n\tgrid-column: 1 / -1;\n\tflex: 0 0 auto;\n\tpadding: 4px 12px;\n\tmargin: 0 0 8px;\n}\n\n.cc-usageRow--dim {\n\topacity: 0.55;\n}\n\n.cc-usageGroup {\n\tdisplay: inline-flex;\n\talign-items: center;\n\tgap: 8px;\n\tflex: 0 0 auto;\n}\n\n.cc-usageLabel {\n\tcolor: var(--cc-text);\n}\n\n.cc-usagePct {\n\tcolor: var(--cc-text-strong);\n\tfont-weight: 500;\n\tmin-width: 3ch;\n\ttext-align: right;\n}\n\n.cc-usageReset {\n\tcolor: var(--cc-text);\n\topacity: 0.8;\n}\n\n.cc-usageText { display: contents; }\n\n.cc-usageReset:empty {\n\tdisplay: none;\n}\n\n/* Narrow layouts: drop the reset countdown (still in the tooltip / title) */\n.cc-compact .cc-usageReset {\n\tdisplay: none;\n}\n\n.cc-compact {\n\tgap: 12px;\n}\n\n/* Bars (mini + usage) */\n.cc-bar {\n\t--cc-radius: 3px;\n\t--cc-stroke: transparent;\n\t--cc-fill: transparent;\n\t--cc-fill-warn: var(--cc-fill);\n\t--cc-marker: transparent;\n\n\tposition: relative;\n\tbox-sizing: border-box;\n\twidth: 100%;\n\theight: 6px;\n\tborder-radius: var(--cc-radius);\n\tborder: 1px solid var(--cc-stroke);\n\toverflow: visible;\n\tuser-select: none;\n}\n\n.cc-bar__fill {\n\twidth: 0%;\n\theight: 100%;\n\tbackground: var(--cc-fill);\n\ttransition: width 300ms ease, background-color 300ms ease;\n\tborder-top-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-top-right-radius: 0;\n\tborder-bottom-right-radius: 0;\n}\n\n.cc-bar__fill.cc-full {\n\tborder-top-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n}\n\n.cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar__marker {\n\tposition: absolute;\n\ttop: 0;\n\tbottom: 0;\n\tleft: 0%;\n\twidth: 2px;\n\tbackground: var(--cc-marker);\n\tpointer-events: none;\n}\n\n/* Usage bars: slim pill, no outline, track derived from text colour */\n.cc-bar.cc-bar--usage {\n\t--cc-radius: 999px;\n\twidth: 64px;\n\theight: 4px;\n\tflex: 0 0 64px;\n\tborder: none;\n\tbackground: color-mix(in srgb, currentColor 22%, transparent);\n}\n\n.cc-bar--usage .cc-bar__fill {\n\tborder-radius: 999px;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-caution {\n\tbackground: #d4a017;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar--usage .cc-bar__marker {\n\ttop: -3px;\n\tbottom: -3px;\n\twidth: 1.5px;\n\tmargin-left: -0.75px;\n\tborder-radius: 1px;\n\tbackground: var(--cc-text-strong);\n\topacity: 0.85;\n}\n\n/* Tooltips */\n.cc-tooltip {\n\tposition: fixed;\n\tz-index: 2147483647;\n\tbox-sizing: border-box;\n\twidth: max-content;\n\tmax-width: min(330px, calc(100vw - 20px));\n\tmax-height: calc(100vh - 20px);\n\toverflow: auto;\n\tpadding: 10px 12px;\n\tborder: 1px solid #575753;\n\tborder-radius: 8px;\n\tbackground: #262624;\n\tcolor: #f5f5f0;\n\tbox-shadow: 0 4px 20px #0005;\n\tfont: 12px/1.5 system-ui, sans-serif;\n\ttext-align: left;\n\twhite-space: pre-line;\n\toverflow-wrap: anywhere;\n\tuser-select: none;\n\tpointer-events: none;\n\topacity: 0;\n\tvisibility: hidden;\n\tisolation: isolate;\n}\n\n.cc-tooltipTrigger {\n\t-webkit-touch-callout: none;\n\t-webkit-user-select: none;\n\tuser-select: none;\n\tcursor: help;\n}\n\n/* Hide optional elements completely (no layout space) */\n.cc-hidden {\n\tdisplay: none !important;\n}\n\n/* Keep a single group within small phone viewports, including long reset text. */\n@media (max-width: 600px) {\n\t.cc-usageRow--above .cc-usageReset { display: none; }\n}\n";
+	style.textContent = "/* A portal above the floating composer softens the transcript's hard cut-off.\n   It ends before the usage row and never receives clicks, drags or scrolling. */\n.cc-composerFade {\n\tposition: fixed;\n\tz-index: 30;\n\tdisplay: none;\n\tpointer-events: none;\n\tuser-select: none;\n}\n\n/* Usage stays above the composer, clear of its menus and the viewport edge. */\n.cc-usageRow {\n\t--cc-text: hsl(var(--text-500, 40 3% 47%));\n\t--cc-text-strong: hsl(var(--text-300, 40 5% 30%));\n\tdisplay: flex;\n\talign-items: center;\n\tgap: 18px;\n\tfont-family: inherit;\n\tfont-size: 12px;\n\tline-height: 16px;\n\tletter-spacing: 0.01em;\n\tfont-variant-numeric: tabular-nums;\n\tcolor: var(--cc-text);\n\tcursor: pointer;\n\tuser-select: none;\n\ttransition: opacity 150ms ease;\n\twhite-space: nowrap;\n}\n\n.cc-usageRow:hover {\n\t--cc-text: hsl(var(--text-400, 40 3% 40%));\n}\n\n/* Normal flow reserves room instead of covering the editor or its controls. */\n.cc-usageRow--above {\n\tbox-sizing: border-box;\n\tjustify-content: flex-end;\n\tflex-wrap: wrap;\n\trow-gap: 6px;\n\twidth: 100%;\n\tmin-width: 0;\n\tgrid-column: 1 / -1;\n\tflex: 0 0 auto;\n\tpadding: 4px 12px;\n\tmargin: 0 auto 8px;\n\tmax-width: 100%;\n}\n\n.cc-usageRow--dim {\n\topacity: 0.55;\n}\n\n.cc-usageGroup {\n\tdisplay: inline-flex;\n\talign-items: center;\n\tgap: 8px;\n\tflex: 0 0 auto;\n}\n\n.cc-usageLabel {\n\tcolor: var(--cc-text);\n}\n\n.cc-usagePct {\n\tcolor: var(--cc-text-strong);\n\tfont-weight: 500;\n\tmin-width: 3ch;\n\ttext-align: right;\n}\n\n.cc-usageReset {\n\tcolor: var(--cc-text);\n\topacity: 0.8;\n}\n\n.cc-usageText { display: contents; }\n\n.cc-usageReset:empty {\n\tdisplay: none;\n}\n\n/* Narrow layouts: drop the reset countdown (still in the tooltip / title) */\n.cc-compact .cc-usageReset {\n\tdisplay: none;\n}\n\n.cc-compact {\n\tgap: 12px;\n}\n\n/* Bars (mini + usage) */\n.cc-bar {\n\t--cc-radius: 3px;\n\t--cc-stroke: transparent;\n\t--cc-fill: transparent;\n\t--cc-fill-warn: var(--cc-fill);\n\t--cc-marker: transparent;\n\n\tposition: relative;\n\tbox-sizing: border-box;\n\twidth: 100%;\n\theight: 6px;\n\tborder-radius: var(--cc-radius);\n\tborder: 1px solid var(--cc-stroke);\n\toverflow: visible;\n\tuser-select: none;\n}\n\n.cc-bar__fill {\n\twidth: 0%;\n\theight: 100%;\n\tbackground: var(--cc-fill);\n\ttransition: width 300ms ease, background-color 300ms ease;\n\tborder-top-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-top-right-radius: 0;\n\tborder-bottom-right-radius: 0;\n}\n\n.cc-bar__fill.cc-full {\n\tborder-top-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n}\n\n.cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar__marker {\n\tposition: absolute;\n\ttop: 0;\n\tbottom: 0;\n\tleft: 0%;\n\twidth: 2px;\n\tbackground: var(--cc-marker);\n\tpointer-events: none;\n}\n\n/* Usage bars: slim pill, no outline, track derived from text colour */\n.cc-bar.cc-bar--usage {\n\t--cc-radius: 999px;\n\twidth: 64px;\n\theight: 4px;\n\tflex: 0 0 64px;\n\tborder: none;\n\tbackground: color-mix(in srgb, currentColor 22%, transparent);\n}\n\n.cc-bar--usage .cc-bar__fill {\n\tborder-radius: 999px;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-caution {\n\tbackground: #d4a017;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar--usage .cc-bar__marker {\n\ttop: -3px;\n\tbottom: -3px;\n\twidth: 1.5px;\n\tmargin-left: -0.75px;\n\tborder-radius: 1px;\n\tbackground: var(--cc-text-strong);\n\topacity: 0.85;\n}\n\n/* Tooltips */\n.cc-tooltip {\n\tposition: fixed;\n\tz-index: 2147483647;\n\tbox-sizing: border-box;\n\twidth: max-content;\n\tmax-width: min(330px, calc(100vw - 20px));\n\tmax-height: calc(100vh - 20px);\n\toverflow: auto;\n\tpadding: 10px 12px;\n\tborder: 1px solid #575753;\n\tborder-radius: 8px;\n\tbackground: #262624;\n\tcolor: #f5f5f0;\n\tbox-shadow: 0 4px 20px #0005;\n\tfont: 12px/1.5 system-ui, sans-serif;\n\ttext-align: left;\n\twhite-space: pre-line;\n\toverflow-wrap: anywhere;\n\tuser-select: none;\n\tpointer-events: none;\n\topacity: 0;\n\tvisibility: hidden;\n\tisolation: isolate;\n}\n\n.cc-tooltipTrigger {\n\t-webkit-touch-callout: none;\n\t-webkit-user-select: none;\n\tuser-select: none;\n\tcursor: help;\n}\n\n/* Hide optional elements completely (no layout space) */\n.cc-hidden, .cc-unmounted {\n\tdisplay: none !important;\n}\n\n/* Keep a single group within small phone viewports, including long reset text. */\n@media (max-width: 600px) {\n\t.cc-usageRow--above .cc-usageReset { display: none; }\n}\n";
 	(document.head || document.documentElement).appendChild(style);
 
 // Source: src/content/ui.js
@@ -913,23 +913,96 @@ function start() {
 			this._setupTooltips();
 			this._observeDom();
 			this._observeTheme();
+			this._initComposerFade();
 		}
 
 		_observeTheme() {
 			// Watch for theme changes (data-mode attribute on <html>)
-			const observer = new MutationObserver(() => this.refreshProgressChrome());
+			const observer = new MutationObserver(() => {
+				this.refreshProgressChrome();
+				this._syncComposerFade();
+			});
 			observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-mode'] });
 		}
 
+		_initComposerFade() {
+			this.composerFade = document.createElement('div');
+			this.composerFade.className = 'cc-composerFade';
+			this.composerFade.setAttribute('aria-hidden', 'true');
+			const schedule = () => {
+				if (this._fadeFrame) return;
+				this._fadeFrame = window.requestAnimationFrame(() => {
+					this._fadeFrame = null;
+					this._syncComposerFade();
+				});
+			};
+			window.addEventListener('scroll', schedule, true);
+			window.addEventListener('resize', schedule);
+			window.visualViewport?.addEventListener('resize', schedule);
+			window.visualViewport?.addEventListener('scroll', schedule);
+			if (window.ResizeObserver) this._fadeObserver = new window.ResizeObserver(schedule);
+			this._syncComposerFade();
+		}
+
+		_syncUsageWidth() {
+			if (!this._usageAnchor?.isConnected || !this.usageLine?.isConnected) return;
+			const width = this._usageAnchor.getBoundingClientRect().width;
+			if (width > 0 && this.usageLine.style.width !== `${width}px`) this.usageLine.style.width = `${width}px`;
+		}
+
+		_syncComposerFade() {
+			this._syncUsageWidth();
+			const fade = this.composerFade;
+			if (!fade) return;
+			const row = this.usageLine;
+			const isChat = /\/chat\/[^/]+/.test(window.location?.pathname || '');
+			if (!isChat || !row?.isConnected || !row.getClientRects().length) {
+				fade.style.display = 'none';
+				return;
+			}
+			const rect = row.getBoundingClientRect();
+			if (rect.top <= 0 || rect.top >= window.innerHeight || rect.right <= 0 || rect.left >= window.innerWidth) {
+				fade.style.display = 'none';
+				return;
+			}
+			// Portal outside the composer: its overflow must not cut off the gradient itself.
+			if (!fade.isConnected) (document.body || document.documentElement).appendChild(fade);
+			if (this._fadeAnchor !== this._usageAnchor) {
+				this._fadeObserver?.disconnect();
+				this._fadeAnchor = this._usageAnchor;
+				this._fadeObserver?.observe(row);
+				if (this._usageAnchor) this._fadeObserver?.observe(this._usageAnchor);
+				if (row.parentElement) this._fadeObserver?.observe(row.parentElement);
+			}
+			// Match the opaque chat backdrop rather than the lighter input-card colour.
+			let background = document.documentElement.dataset?.mode === 'dark' ? '#191919' : '#faf9f5';
+			for (let el = row.parentElement; el; el = el.parentElement) {
+				const color = window.getComputedStyle(el).backgroundColor;
+				if (color && color !== 'transparent' && !/^rgba\(.*,[\s]*0(?:\.\d+)?\)$/.test(color)) {
+					background = color;
+					break;
+				}
+			}
+			const top = Math.max(0, rect.top - 40);
+			const left = Math.max(0, rect.left);
+			fade.style.display = 'block';
+			fade.style.left = `${left}px`;
+			fade.style.top = `${top}px`;
+			fade.style.width = `${Math.min(window.innerWidth, rect.right) - left}px`;
+			fade.style.height = `${rect.top - top}px`;
+			fade.style.backgroundImage = `linear-gradient(to bottom, transparent, ${background})`;
+		}
+
 		_observeDom() {
-			this.domObserver = new MutationObserver(() => {
+			this.domObserver = new MutationObserver((records) => {
+				if (records.length && records.every((r) => r.target?.closest?.('.cc-usageRow, .cc-tooltip, .cc-composerFade'))) return;
 				if (this._usageMisplaced()) this._scheduleUsageReattach(150);
 			});
 
 			const startObserving = () => {
 				const target = document.body || document.documentElement;
 				if (target) {
-					this.domObserver.observe(target, { childList: true, subtree: true });
+					this.domObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'data-testid', 'contenteditable', 'inert'] });
 				}
 			};
 
@@ -942,7 +1015,7 @@ function start() {
 
 		_initUsageLine() {
 			this.usageLine = document.createElement('div');
-			this.usageLine.className = 'cc-usageRow';
+			this.usageLine.className = 'cc-usageRow cc-unmounted';
 			const makeGroup = (label) => {
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
@@ -1024,10 +1097,17 @@ function start() {
 		_attachUsageLine() {
 			if (!this.usageLine) return;
 			const box = this._findComposerBox();
-			if (!box || !box.parentElement) return;
+			if (!box || !box.parentElement) {
+				this.usageLine.classList.add('cc-unmounted');
+				this._usageAnchor = null;
+				this._syncComposerFade();
+				return;
+			}
 			this._usageAnchor = box;
+			this.usageLine.classList.remove('cc-unmounted');
 			this.usageLine.classList.add('cc-usageRow--above');
 			if (this.usageLine.nextElementSibling !== box) box.before(this.usageLine);
+			this._syncComposerFade();
 			this.refreshProgressChrome();
 		}
 
@@ -1040,22 +1120,36 @@ function start() {
 		}
 
 		_usageMisplaced() {
-			const input = document.querySelector(CC.DOM.CHAT_INPUT);
-			if (!input || !this.usageLine) return false;
-			return !document.contains(this.usageLine) || !this._usageAnchor?.contains(input) || this.usageLine.nextElementSibling !== this._usageAnchor;
+			if (!this.usageLine) return false;
+			const box = this._findComposerBox();
+			if (!box) return !this.usageLine.classList.contains('cc-unmounted');
+			return this.usageLine.classList.contains('cc-unmounted') || !document.contains(this.usageLine) || this._usageAnchor !== box || this.usageLine.nextElementSibling !== box;
 		}
 
 		_findComposerBox() {
-			const editor = document.querySelector(CC.DOM.CHAT_INPUT);
-			if (!editor) return null;
-			for (let el = editor.parentElement; el && el !== document.body; el = el.parentElement) {
-				const s = window.getComputedStyle(el);
-				const radius = parseFloat(s.borderTopLeftRadius) || 0;
-				const hasBg = s.backgroundColor && s.backgroundColor !== 'transparent' && s.backgroundColor !== 'rgba(0, 0, 0, 0)';
-				if (el.matches('.bg-surface-3') || (radius >= 8 && (hasBg || parseFloat(s.borderTopWidth) > 0 || (s.boxShadow && s.boxShadow !== 'none')))) return el;
-				if (el.matches('fieldset, form')) return el;
+			// Loading placeholders and hidden, previous composers must never win discovery.
+			const selectors = ['[data-testid="chat-input"]', '.ProseMirror[contenteditable="true"]', 'div[contenteditable="true"]', 'textarea'];
+			const seen = new Set();
+			for (const selector of selectors) {
+				for (const editor of document.querySelectorAll(selector)) {
+					if (seen.has(editor)) continue;
+					seen.add(editor);
+					if (!editor.getClientRects().length || editor.closest('[role="dialog"], [aria-hidden="true"], [inert], aside, nav, header')) continue;
+					const bounds = editor.getBoundingClientRect();
+					if (!bounds.width || !bounds.height || bounds.bottom <= 0 || bounds.top >= window.innerHeight || bounds.right <= 0 || bounds.left >= window.innerWidth) continue;
+					const editorStyle = window.getComputedStyle(editor);
+					if (editorStyle.visibility === 'hidden' || editorStyle.display === 'none') continue;
+					for (let el = editor.parentElement; el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+						if (el.matches('main, aside, nav, header')) break;
+						const style = window.getComputedStyle(el);
+						if (!el.getClientRects().length || style.visibility === 'hidden' || style.display === 'none') break;
+						const radius = parseFloat(style.borderTopLeftRadius) || 0;
+						const hasBg = style.backgroundColor && style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
+						if (el.matches('.bg-surface-3') || (radius >= 8 && (hasBg || parseFloat(style.borderTopWidth) > 0 || (style.boxShadow && style.boxShadow !== 'none')))) return el;
+					}
+				}
 			}
-			return editor.parentElement && editor.parentElement !== document.body ? editor.parentElement : null;
+			return null;
 		}
 
 		_usageTooltipText(key) {
@@ -1229,6 +1323,8 @@ function start() {
 		}
 
 		tick() {
+			if (this._usageMisplaced()) this.attachUsageLine();
+			this._syncComposerFade();
 			// Reset text is separate so compact mode can hide it without parsing labels.
 			for (const key of ['session', 'weekly']) {
 				const resetMs = this[`${key}ResetMs`];
