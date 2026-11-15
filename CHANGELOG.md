@@ -2,6 +2,17 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.4] - 2026-11-15
+
+### Removed
+- Retired the approximate token summary, reference bar and estimated cache timer from both builds. The complete prior implementation, tokenizer, license and feature tests remain on `archive/token-summary-v2.1.3`; see [archive notes](docs/token-summary-archive.md).
+- Removed the tokenizer from extension loading and the generated userscript, along with token-counting modules and conversation-refresh work. Passive conversation response copying is no longer performed.
+- The standalone userscript is now about 61 KB rather than 2.1 MB. Session/weekly tracking, Connect/SSE limits, persistence and refresh backoff remain active.
+
+### Notes
+- Added [proposed composer layout fixes](docs/composer-layout-options.md) for the reported transcript overlap. These options are not implemented in this removal release; removing the summary reduces the floating composer's height but does not establish that transcript clearance is correct.
+- Validation: 82 active automated tests and Chromium smoke checks pass. The archive retains tests for the retired functionality.
+
 ## [2.1.3] - 2026-11-15
 
 ### Fixed

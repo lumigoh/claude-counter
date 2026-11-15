@@ -63,14 +63,6 @@
 			handleConnectStream(response);
 		}
 
-		// Catch conversation tree / messages fetches
-		if (url && url.includes('/chat_conversations/') && method === 'GET') {
-			const meta = getConversationMeta(url);
-			if (meta) {
-				handleConversationResponse(meta, response);
-			}
-		}
-
 		return response;
 	};
 
@@ -100,24 +92,6 @@
 		if (input instanceof URL) return input.href;
 		if (input instanceof Request) return input.url;
 		return '';
-	}
-
-	function getConversationMeta(url) {
-		// /api/organizations/{orgId}/chat_conversations/{conversationId}
-		const match = url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)\/chat_conversations\/([^/?]+)/);
-		return match ? { orgId: match[1], conversationId: match[2] } : null;
-	}
-
-	async function handleConversationResponse({ orgId, conversationId }, response) {
-		try {
-			const cloned = response.clone();
-			const data = await cloned.json();
-			if (data && (data.chat_messages || data.uuid || data.current_leaf_message_uuid)) {
-				post('cc:conversation', { orgId, conversationId, data });
-			}
-		} catch {
-			// ignore parse failures
-		}
 	}
 
 	async function handleEventStream(response) {

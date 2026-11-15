@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createMainEnv, liveWindow, limitsEvent, conversation, ORG, CONV } = require('./helpers/main-harness');
+const { createMainEnv, liveWindow, limitsEvent, ORG } = require('./helpers/main-harness');
 
 const START = Date.UTC(2026, 9, 14, 12, 0, 0);
 const MIN = 60 * 1000;
@@ -248,162 +248,6 @@ test('M09 a limits event without windows changes nothing', async () => {
 	assert.equal(env.calls.setUsage.length, before);
 });
 
-// ---- conversation: token count and cache timer ----
-
-function twoMessages(assistantAt) {
-	return conversation(CONV, [
-		{ uuid: 'm1', sender: 'human', created_at: new Date(assistantAt - 5000).toISOString() },
-		{ uuid: 'm2', sender: 'assistant', created_at: new Date(assistantAt).toISOString() }
-	]);
-}
-function fourMessages(assistantAt) {
-	return conversation(CONV, [
-		{ uuid: 'm1', sender: 'human', created_at: new Date(assistantAt - 60000).toISOString() },
-		{ uuid: 'm2', sender: 'assistant', created_at: new Date(assistantAt - 50000).toISOString() },
-		{ uuid: 'm3', sender: 'human', created_at: new Date(assistantAt - 5000).toISOString() },
-		{ uuid: 'm4', sender: 'assistant', created_at: new Date(assistantAt).toISOString() }
-	]);
-}
-
-test('M10 opening a chat reads the conversation and shows tokens and the cache end', async () => {
-	const at = START - 60000;
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(at) } });
-	const m = env.calls.setMetrics[env.calls.setMetrics.length - 1];
-	assert.equal(m.totalTokens, 20);
-	assert.equal(m.cachedUntil, at + 5 * MIN);
-	assert.equal(env.calls.conversationRequests.length, 1);
-});
-
-test('M11 end of a reply: the conversation is read again and the timer follows', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - HOUR) } });
-	assert.equal(env.calls.conversationRequests.length, 1);
-	assert.equal(env.calls.setMetrics[env.calls.setMetrics.length - 1].cachedUntil, START - HOUR + 5 * MIN, 'expired timer');
-
-	const doneAt = START + 10 * MIN;
-	await env.clock.advance(10 * MIN);
-	env.answers.conversation = async () => fourMessages(env.clock.now);
-	await env.emit('cc:turn_end', {});
-	await env.clock.advance(1300);
-
-	assert.equal(env.calls.conversationRequests.length, 2, 'read once after 1.2 s');
-	const m = env.calls.setMetrics[env.calls.setMetrics.length - 1];
-	assert.equal(m.totalTokens, 40);
-	assert.ok(m.cachedUntil >= doneAt + 5 * MIN);
-
-	await env.clock.advance(30000);
-	assert.equal(env.calls.conversationRequests.length, 2, 'new messages seen: no more reads');
-});
-
-test('M11b the server is slow to store the reply: it is read again, three times at most', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - HOUR) } });
-	await env.emit('cc:turn_end', {});
-	await env.clock.advance(60000);
-	assert.equal(env.calls.conversationRequests.length, 1 + 3);
-
-	// the timer still runs from the end of the reply
-	const m = env.calls.setMetrics[env.calls.setMetrics.length - 1];
-	assert.equal(m.cachedUntil, START + 5 * MIN);
-});
-
-test('M11c the slow server catches up on the second read', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - HOUR) } });
-	await env.emit('cc:turn_end', {});
-	await env.clock.advance(1300);
-	assert.equal(env.calls.conversationRequests.length, 2);
-	env.answers.conversation = async () => fourMessages(env.clock.now);
-	await env.clock.advance(5000);
-	assert.equal(env.calls.conversationRequests.length, 3);
-	await env.clock.advance(30000);
-	assert.equal(env.calls.conversationRequests.length, 3);
-});
-
-test('M11d the conversation JSON is newer than the provisional end: the newer one wins', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - HOUR) } });
-	env.answers.conversation = async () => fourMessages(START + 2 * MIN);
-	await env.emit('cc:turn_end', {});
-	await env.clock.advance(1300);
-	const m = env.calls.setMetrics[env.calls.setMetrics.length - 1];
-	assert.equal(m.cachedUntil, START + 2 * MIN + 5 * MIN);
-});
-
-test('M11e leaving the chat stops the follow-up reads', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - HOUR) } });
-	await env.emit('cc:turn_end', {});
-	await env.clock.advance(500);
-	await env.navigate('/new');
-	await env.clock.advance(30000);
-	assert.equal(env.calls.conversationRequests.length, 1);
-});
-
-test('M11f a reply ending on the home page (no chat open) is ignored', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, pathname: '/new' });
-	await env.emit('cc:turn_end', {});
-	await env.clock.advance(30000);
-	assert.equal(env.calls.conversationRequests.length, 0);
-});
-
-test('M12 conversation data for another chat is ignored', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	const before = env.calls.setMetrics.length;
-	await env.emit('cc:conversation', { orgId: ORG, conversationId: 'some-other-chat', data: twoMessages(START) });
-	await env.clock.flush();
-	assert.equal(env.calls.setMetrics.length, before);
-});
-
-test('M13 an older read that finishes late does not overwrite a newer one', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	const CC = env.context.ClaudeCounter;
-	const original = CC.tokens.computeConversationMetrics;
-	let first = true;
-	CC.tokens.computeConversationMetrics = async (data) => {
-		const wasFirst = first;
-		first = false;
-		if (wasFirst) await new Promise((r) => env.context.setTimeout(r, 500));
-		return original(data);
-	};
-	const slow = env.emit('cc:conversation', { orgId: ORG, conversationId: CONV, data: twoMessages(START) });
-	const fast = env.emit('cc:conversation', { orgId: ORG, conversationId: CONV, data: fourMessages(START) });
-	await env.clock.advance(600);
-	await Promise.all([slow, fast]);
-	const m = env.calls.setMetrics[env.calls.setMetrics.length - 1];
-	assert.equal(m.totalTokens, 40, 'the newer (four messages) read is what stays');
-});
-
-test('M14 several ends of a reply in a row: only the newest follow-up read loop runs', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - HOUR) } });
-	for (let i = 0; i < 4; i++) {
-		await env.emit('cc:turn_end', {});
-		await env.clock.advance(50);
-	}
-	await env.clock.advance(60000);
-	// the initial read plus one loop of three, not four loops
-	assert.equal(env.calls.conversationRequests.length, 1 + 3);
-});
-
-test('M15 a conversation read that is not a conversation (error body) keeps the header', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - 60000) } });
-	const before = env.calls.setMetrics.length;
-	const last = env.calls.setMetrics[before - 1];
-	await env.emit('cc:conversation', { orgId: ORG, conversationId: CONV, data: { type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } } });
-	await env.clock.flush();
-	assert.equal(env.calls.setMetrics.length, before, 'nothing changed');
-	assert.equal(last.totalTokens, 20);
-});
-
-test('M16 the chat title from the conversation read is handed to the header placement', async () => {
-	const data = twoMessages(START - 60000);
-	data.name = 'Můj rodinný rozpočet';
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: data } });
-	assert.deepEqual(env.calls.titles, ['Můj rodinný rozpočet']);
-});
-
-test('M16b an error body does not touch the title', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, conversations: { [CONV]: twoMessages(START - 60000) } });
-	const before = env.calls.titles.length;
-	await env.emit('cc:conversation', { orgId: ORG, conversationId: CONV, data: { name: 'x', type: 'error' } });
-	assert.equal(env.calls.titles.length, before);
-});
-
 // ---- persistence across reloads ----
 
 const OTHER_ORG = '99999999-8888-4777-8666-555555555555';
@@ -542,4 +386,14 @@ test('M57e extra refresh events respect failure backoff and hidden tabs', async 
 	env.window.dispatchEvent({ type: 'focus' });
 	await env.clock.flush();
 	assert.equal(env.calls.usageRequests.length, 2);
+});
+
+
+test('M21 opening a chat and completing a turn do not fetch token-summary data', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:turn_end', {});
+	await env.emit('cc:generation_start', {});
+	await env.clock.advance(20000);
+	assert.equal(env.calls.conversationRequests.length, 0);
+	assert.equal(env.calls.setMetrics.length, 0);
 });

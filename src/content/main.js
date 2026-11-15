@@ -5,11 +5,6 @@
 	if (CC.__started) return;
 	CC.__started = true;
 
-	function getConversationId() {
-		const match = window.location.pathname.match(/\/chat\/([^/?]+)/);
-		return match ? match[1] : null;
-	}
-
 	// Every organisation id this page has resolved or seen in the page's own requests. A saved usage
 	// snapshot is matched against any of them, because the id found at start-up (cookie, list of
 	// organisations) is not always the one the page's requests use.
@@ -188,7 +183,6 @@
 		return { five_hour: fiveHour, seven_day: sevenDay };
 	}
 
-	let currentConversationId = null;
 	let currentOrgId = null;
 
 	// Usage state: one entry per window. A window is either live ({ utilization, resets_at, ... }),
@@ -384,110 +378,12 @@
 	});
 	window.addEventListener('focus', () => refreshUsageIfStale(60 * 1000));
 
-	async function refreshConversation() {
-		await bridgeReady;
-		if (!currentConversationId) {
-			ui.setConversationMetrics();
-			return;
-		}
-
-		const orgId = await getOrgId();
-		if (!orgId) return;
-		updateOrgIdIfNeeded(orgId);
-
-		try {
-			await CC.bridge.requestConversation(orgId, currentConversationId);
-		} catch {
-			// Bridge failed or timed out; try direct fetch fallback
-			try {
-				const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${currentConversationId}?tree=true&rendering_mode=messages&render_all_tools=true`;
-				const res = await fetch(url, { credentials: 'include' });
-				if (res.ok) {
-					const json = await res.json();
-					handleConversationPayload({ orgId, conversationId: currentConversationId, data: json });
-				}
-			} catch {}
-		}
-	}
-
-	function handleGenerationStart() {
-		if (!currentConversationId) return;
-		ui.setPendingCache(true);
-	}
-
-	// Per conversation: how many messages the last read contained, and a provisional end of the cache
-	// window set when a reply finished (until the conversation read confirms it).
-	const trunkCountByConversation = new Map();
-	let provisionalCache = null; // { conversationId, until }
-	let metricsSeq = 0;
-
-	let metricsDone = Promise.resolve();
-
-	function handleConversationPayload(payload) {
-		const run = processConversationPayload(payload || {});
-		metricsDone = run.catch(() => {});
-		return run;
-	}
-
-	async function processConversationPayload({ orgId, conversationId, data }) {
-		if (!conversationId || conversationId !== currentConversationId) return;
-		updateOrgIdIfNeeded(orgId);
-		// Not a conversation (an error body, for example): keep what is shown.
-		if (!data || !Array.isArray(data.chat_messages)) return;
-		// The title lets the header be placed next to the title element of the page.
-		if (typeof data.name === 'string') ui.setConversationTitle(data.name);
-
-		const seq = ++metricsSeq;
-		const metrics = await CC.tokens.computeConversationMetrics(data);
-		// A newer read finished (or the user moved to another chat) while this one was being counted.
-		if (seq !== metricsSeq || conversationId !== currentConversationId) return;
-
-		trunkCountByConversation.set(conversationId, metrics.trunkMessageCount);
-
-		let cachedUntil = metrics.cachedUntil;
-		if (provisionalCache && provisionalCache.conversationId === conversationId && provisionalCache.until > Date.now()) {
-			cachedUntil = Math.max(cachedUntil || 0, provisionalCache.until);
-		}
-		ui.setConversationMetrics({ totalTokens: metrics.totalTokens, cachedUntil });
-	}
-
 	function handleMessageLimit(messageLimit) {
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
 	}
 
-	function sleep(ms) {
-		return new Promise((resolve) => setTimeout(resolve, ms));
-	}
-
-	// New interface: the page does not fetch the conversation JSON when a reply is done, so the
-	// bridge announces the end of a reply (cc:turn_end) and the conversation is read again here.
-	// The server may need a moment to store the new messages, hence the retries.
-	let turnRefreshId = 0;
-
-	async function refreshAfterTurn(conversationId, knownCount, id) {
-		for (const delayMs of [1200, 5000, 12000]) {
-			await sleep(delayMs);
-			// Left the chat, or a newer end of a reply took over.
-			if (currentConversationId !== conversationId || id !== turnRefreshId) return;
-			await refreshConversation();
-			await metricsDone;
-			if ((trunkCountByConversation.get(conversationId) ?? -1) > knownCount) return;
-		}
-	}
-
-	function handleTurnEnd() {
-		if (!currentConversationId) return;
-		const conversationId = currentConversationId;
-		provisionalCache = { conversationId, until: Date.now() + CC.CONST.CACHE_WINDOW_MS };
-		const id = ++turnRefreshId;
-		refreshAfterTurn(conversationId, trunkCountByConversation.get(conversationId) ?? -1, id).catch(() => {});
-	}
-
-	CC.bridge.on('cc:generation_start', handleGenerationStart);
-	CC.bridge.on('cc:conversation', handleConversationPayload);
 	CC.bridge.on('cc:message_limit', handleMessageLimit);
-	CC.bridge.on('cc:turn_end', handleTurnEnd);
 	CC.bridge.on('cc:org_detected', (payload) => {
 		if (payload?.orgId) {
 			updateOrgIdIfNeeded(payload.orgId);
@@ -517,19 +413,12 @@
 	async function handleUrlChange() {
 		if (!(await isExtensionEnabled())) return;
 
-		currentConversationId = getConversationId();
-
 		// Attach immediately if elements already exist
 		ui.attachUsageLine();
-		ui.attachHeader();
 
-		// Attach usage line and header independently - they have different anchor elements
-		// and the header anchor doesn't exist on home/new pages
+		// Reattach when the composer appears after navigation.
 		waitForElement(CC.DOM.CHAT_INPUT, 60000).then((el) => {
 			if (el) ui.attachUsageLine();
-		});
-		waitForElement(CC.DOM.CHAT_HEADER_ANCHOR, 60000).then((el) => {
-			if (el) ui.attachHeader();
 		});
 
 		// Usage is org-level: restore/refresh on every page, including home/new
@@ -539,54 +428,10 @@
 		if (!usageState && !lastUsageFetchMs && !usageFailures) await refreshUsage();
 		else refreshUsageIfStale(2 * 60 * 1000);
 
-		if (!currentConversationId) {
-			ui.setConversationMetrics();
-			return;
-		}
-
-		await refreshConversation();
 	}
 
 	const unobserveUrl = observeUrlChanges(handleUrlChange);
 	window.addEventListener('beforeunload', unobserveUrl);
-
-	// Refresh on branch navigation - watch for the branch indicator to change
-	let branchObserver = null;
-	document.addEventListener('click', (e) => {
-		if (!currentConversationId) return;
-		const btn = e.target.closest('button[aria-label="Previous"], button[aria-label="Next"]');
-		if (!btn) return;
-
-		// Find the branch indicator span (matches "X / Y" pattern) near the clicked button
-		const container = btn.closest('.inline-flex');
-		const spans = container?.querySelectorAll('span') || [];
-		const indicator = Array.from(spans).find((s) => /^\d+\s*\/\s*\d+$/.test(s.textContent.trim()));
-		if (!indicator) return;
-
-		const originalText = indicator.textContent;
-
-		// Clean up any existing observer
-		if (branchObserver) branchObserver.disconnect();
-
-		// Watch for the indicator text to change (with cleanup timeout)
-		branchObserver = new MutationObserver(() => {
-			if (indicator.textContent !== originalText) {
-				branchObserver.disconnect();
-				branchObserver = null;
-				refreshConversation();
-			}
-		});
-
-		branchObserver.observe(indicator, { childList: true, characterData: true, subtree: true });
-
-		// Clean up if nothing changes after 60 seconds
-		setTimeout(() => {
-			if (branchObserver) {
-				branchObserver.disconnect();
-				branchObserver = null;
-			}
-		}, 60000);
-	});
 
 	// Initial attach + fetches
 	handleUrlChange();

@@ -71,20 +71,6 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 		}
 	}
 
-	const tokens = {
-		async computeConversationMetrics(data) {
-			const messages = data.chat_messages || [];
-			const lastAssistant = [...messages].reverse().find((m) => m.sender === 'assistant');
-			const lastMs = lastAssistant ? Date.parse(lastAssistant.created_at) : null;
-			return {
-				trunkMessageCount: messages.length,
-				totalTokens: data.fakeTokens ?? messages.length * 10,
-				lastAssistantMs: lastMs,
-				cachedUntil: lastMs ? lastMs + 5 * 60 * 1000 : null
-			};
-		}
-	};
-
 	const env = createContentEnv({
 		files: ['content/constants.js'],
 		storage,
@@ -105,7 +91,6 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 
 	const CC = env.context.ClaudeCounter;
 	CC.ui = { CounterUI: StubUI };
-	CC.tokens = tokens;
 	CC.bridge = bridge;
 	CC.injectBridgeOnce = () => Promise.resolve(true);
 

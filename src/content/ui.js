@@ -21,12 +21,6 @@
 			};
 
 
-	function formatSeconds(totalSeconds) {
-		const minutes = Math.floor(totalSeconds / 60);
-		const seconds = totalSeconds % 60;
-		return `${minutes}:${String(seconds).padStart(2, '0')}`;
-	}
-
 	function formatResetCountdown(timestampMs) {
 		// <= 0: reset time reached
 		const diffMs = timestampMs - Date.now();
@@ -131,66 +125,12 @@
 		return tip;
 	}
 
-	// A title that says nothing about the chat cannot be used to find the title element in the page.
-	const GENERIC_TITLES = new Set(['claude', 'new chat', 'untitled', 'chats', 'projects', 'nov\u00fd chat']);
-	const TITLE_STOP_TAGS = new Set(['HEADER', 'MAIN', 'BODY', 'HTML', 'NAV', 'ASIDE', 'SECTION', 'FORM']);
-	const TITLE_SCAN_MIN_MS = 1500;
-	const TITLE_SCAN_MAX_TRIES = 25;
-	// Header under the title: the left padding of the header (the text starts that far in) and how far
-	// up into the title's own box it starts.
-	const HEADER_PAD_PX = 4;
-	const TITLE_GAP_PX = 6;
-
-	const normText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
-	const hasElementChild = (el) => Array.from(el.children || []).some((c) => c && c.nodeType === 1);
-
 	class CounterUI {
 		constructor({ onUsageRefresh } = {}) {
 			this.onUsageRefresh = onUsageRefresh || null;
-
-			this.headerContainer = null;
-			this.headerDisplay = null;
-			this.lengthGroup = null;
-			this.lengthDisplay = null;
-			this.cachedDisplay = null;
-			this.lengthBar = null;
-			this.lengthTooltip = null;
-			this.lastCachedUntilMs = null;
-			this.pendingCache = false;
-			this.headerInFallback = false;
-			// 'anchor' (next to the page's title element), 'title' (a second line under the title, found
-			// by the title text), 'bars' (above the usage bars), 'none' (not placed yet)
-			this.headerPlacement = 'none';
-			this._hiddenTicks = 0;
-			this.conversationTitle = '';
-			this._titleTries = 0;
-			this._titleScanAt = 0;
-			this._titleRejected = '';
-			this._titleAnchor = null;
-			this._titleLeaf = null;
-			this._badRowTicks = 0;
-			this._ticks = 0;
-
-			this.usageLine = null;
-			this.sessionUsageSpan = null;
-			this.weeklyUsageSpan = null;
-			this.sessionBar = null;
-			this.sessionBarFill = null;
-			this.weeklyBar = null;
-			this.weeklyBarFill = null;
-			this.sessionResetMs = null;
-			this.weeklyResetMs = null;
-			this.sessionMarker = null;
-			this.weeklyMarker = null;
-			this.sessionWindowStartMs = null;
-			this.weeklyWindowStartMs = null;
-			this.refreshingUsage = false;
-
-			this.sessionTooltip = null;
 			this.sessionHistory = [];
 			this.sessionResetKey = null;
-
-			this.domObserver = null;
+			this.refreshingUsage = false;
 		}
 
 		getProgressChrome() {
@@ -218,31 +158,12 @@
 				bar.style.setProperty('--cc-marker', markerColor);
 			};
 
-			applyBarChrome(this.lengthBar, { fillWarn: fillColor });
 			applyBarChrome(this.sessionBar, { fillWarn: CC.COLORS.RED_WARNING });
 			applyBarChrome(this.weeklyBar, { fillWarn: CC.COLORS.RED_WARNING });
 		}
 
 		initialize() {
-			// Header container (tokens + cache timer)
-			this.headerContainer = document.createElement('div');
-			this.headerContainer.className = 'text-text-500 text-xs !px-1 cc-header';
-
-			this.headerDisplay = document.createElement('span');
-			this.headerDisplay.className = 'cc-headerItem';
-
-			this.lengthGroup = document.createElement('span');
-			this.lengthGroup.className = 'cc-lengthGroup';
-			this.lengthDisplay = document.createElement('span');
-			this.cachedDisplay = document.createElement('span');
-			this.cacheTimeSpan = null; // reference to inner time span
-
-			this.lengthGroup.appendChild(this.lengthDisplay);
-			this.headerDisplay.appendChild(this.lengthGroup);
-
-			// Usage line (session + weekly)
 			this._initUsageLine();
-
 			this._setupTooltips();
 			this._observeDom();
 			this._observeTheme();
@@ -255,24 +176,8 @@
 		}
 
 		_observeDom() {
-			// Track pending reattach attempts independently
-			let headerReattachPending = false;
-
 			this.domObserver = new MutationObserver(() => {
 				if (this._usageMisplaced()) this._scheduleUsageReattach(150);
-				const headerMissing = !document.contains(this.headerContainer);
-
-				if (headerMissing && !document.querySelector(CC.DOM.CHAT_HEADER_ANCHOR)) {
-					this._mountHeaderFallback();
-				}
-
-				if (headerMissing && !headerReattachPending) {
-					headerReattachPending = true;
-					CC.waitForElement(CC.DOM.CHAT_HEADER_ANCHOR, 60000).then((el) => {
-						headerReattachPending = false;
-						if (el) this.attachHeader();
-					});
-				}
 			});
 
 			const startObserving = () => {
@@ -345,21 +250,6 @@
 		}
 
 		_setupTooltips() {
-			this.lengthTooltip = makeTooltip(
-				"Estimated conversation size\nCounts visible text and tool content, not hidden instructions or images.\nThe tokenizer differs from Claude's; compaction can make this estimate stale.\nBar scale: 200k tokens — a display reference, not your model's confirmed limit."
-			);
-			setupTooltip(
-				this.lengthGroup,
-				this.lengthTooltip,
-				{ topOffset: 8 }
-			);
-
-			setupTooltip(
-				this.cachedDisplay,
-				makeTooltip("Estimated prompt cache\nFive minutes from the latest assistant reply.\nThis timer is an estimate; cache availability and billing depend on Claude."),
-				{ topOffset: 8 }
-			);
-
 			this.sessionTooltip = makeTooltip(
 				this._usageTooltipText('session')
 			);
@@ -378,272 +268,13 @@
 		}
 
 		attach() {
-			this.attachHeader();
 			this.attachUsageLine();
-			this.refreshProgressChrome();
-		}
-
-		/**
-		 * The header anchor is specific to a claude.ai layout. Where it cannot be found, or the header
-		 * ends up invisible, the token count and cache timer are shown just above the usage bars,
-		 * which are mounted next to the chat input and work in every layout seen so far.
-		 */
-		_mountHeaderFallback() {
-			if (this._mountHeaderByTitle()) return true;
-			return this._mountHeaderAboveBars();
-		}
-
-		_resetHeaderStyle() {
-			const st = this.headerContainer.style;
-			st.paddingLeft = '';
-			st.display = '';
-			st.alignItems = '';
-			st.marginLeft = '';
-			st.marginTop = '';
-			st.whiteSpace = '';
-			st.position = '';
-			st.left = '';
-			st.top = '';
-			st.zIndex = '';
-			st.pointerEvents = '';
-		}
-
-		_mountHeaderAboveBars() {
-			const line = this.usageLine;
-			if (!line || !line.parentElement || !this.headerContainer) return false;
-			if (line.previousElementSibling !== this.headerContainer) line.before(this.headerContainer);
-			this._resetHeaderStyle();
-			this.headerContainer.style.paddingLeft = '12px';
-			this.headerInFallback = true;
-			this.headerPlacement = 'bars';
-			this._badRowTicks = 0;
-			this._renderHeader();
-			return true;
-		}
-
-		/** The chat title, as the conversation read gives it. */
-		setConversationTitle(name) {
-			const next = normText(name);
-			if (next === this.conversationTitle) return;
-			this.conversationTitle = next;
-			this._titleTries = 0;
-			this._titleRejected = '';
-			this._titleScanAt = 0;
-			if (this.headerPlacement === 'bars') this._mountHeaderByTitle();
-		}
-
-		_titleCandidates() {
-			const out = [];
-			const add = (t) => {
-				const text = normText(t);
-				if (text.length >= 2 && !GENERIC_TITLES.has(text.toLowerCase()) && !out.includes(text)) out.push(text);
-			};
-			add(this.conversationTitle);
-			try {
-				add(String(document.title || '').replace(/\s*[-\u2013\u2014|\u00b7]\s*Claude\s*$/i, ''));
-			} catch {
-				// ignore
-			}
-			return out;
-		}
-
-		/**
-		 * Where the page shows the chat title, found by the title's own text: the layout of the new
-		 * interface is not known, the text is. Returns the elements the header may follow, the widest
-		 * wrapper that holds nothing but the title first, the title text element itself last.
-		 */
-		_findTitleAnchors(titles) {
-			const all = document.querySelectorAll('*');
-			let leaf = null;
-			for (const el of all) {
-				if (hasElementChild(el)) continue;
-				const text = normText(el.textContent);
-				if (!text || !titles.includes(text)) continue;
-				if (el.closest('nav, aside, [role="navigation"], .cc-header, .cc-usageRow, .cc-tooltip, script, style')) continue;
-				const r = el.getBoundingClientRect();
-				if (!(r.width > 0 && r.height > 0 && r.top < 140 && r.bottom > 0)) continue;
-				leaf = el;
-				break;
-			}
-			if (!leaf) return [];
-			const text = normText(leaf.textContent);
-			const chain = [leaf];
-			let anchor = leaf;
-			while (anchor.parentElement && !TITLE_STOP_TAGS.has(anchor.parentElement.tagName) && normText(anchor.parentElement.textContent) === text) {
-				anchor = anchor.parentElement;
-				chain.push(anchor);
-			}
-			return chain.reverse();
-		}
-
-		/** Out of the row (no room taken from the title or the buttons), placed by _positionHeaderUnderTitle. */
-		_styleHeaderUnderTitle() {
-			this._resetHeaderStyle();
-			const st = this.headerContainer.style;
-			st.position = 'absolute';
-			st.display = 'inline-flex';
-			st.alignItems = 'center';
-			st.marginLeft = '0';
-			st.marginTop = '0';
-			st.whiteSpace = 'nowrap';
-			st.zIndex = '1';
-			st.pointerEvents = 'auto';
-		}
-
-		/** Puts the header under the start of the title, measured against the element it is positioned in. */
-		_positionHeaderUnderTitle(leaf) {
-			const parent = this.headerContainer.offsetParent;
-			if (!parent || !leaf || parent === document.body || parent === document.documentElement) return false;
-			const pr = parent.getBoundingClientRect();
-			const lr = leaf.getBoundingClientRect();
-			const st = this.headerContainer.style;
-			st.left = `${Math.round(lr.left - pr.left - HEADER_PAD_PX)}px`;
-			const top = lr.bottom + TITLE_GAP_PX;
-			const height = this.headerContainer.getBoundingClientRect().height;
-			if (top + height > pr.bottom - 4) return false;
-			st.top = `${Math.round(top - pr.top)}px`;
-			return true;
-		}
-
-		/** The header sits right under the start of the title, inside the window. */
-		_headerUnderTitle(leaf) {
-			const hr = this.headerContainer.getBoundingClientRect();
-			const lr = leaf.getBoundingClientRect();
-			if (!(hr.width > 0 && hr.height > 0)) return false;
-			if (Math.abs(hr.left - (lr.left - HEADER_PAD_PX)) > 3) return false;
-			if (hr.top < lr.bottom + TITLE_GAP_PX - 1) return false;
-			if (hr.top - lr.bottom > 12) return false;
-			const viewWidth = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : Infinity;
-			return hr.right <= viewWidth + 1;
-		}
-
-		_mountHeaderByTitle() {
-			if (!this.headerContainer || !document.body) return false;
-			const titles = this._titleCandidates();
-			if (titles.length === 0) return false;
-			// An empty header has no size: whether it sits under the title cannot be checked. It is
-			// placed when the token count arrives (setConversationMetrics) or by the periodic retry.
-			if (!this.headerContainer.firstChild) return false;
-			const key = titles.join('|');
-			if (this._titleRejected === key) return false;
-
-			const now = Date.now();
-			if (now - this._titleScanAt < TITLE_SCAN_MIN_MS) return false;
-			if (this._titleTries >= TITLE_SCAN_MAX_TRIES) return false;
-			this._titleScanAt = now;
-			this._titleTries += 1;
-
-			const anchors = this._findTitleAnchors(titles);
-			if (anchors.length === 0) return false;
-
-			// Not outside the bar that holds the title: the first anchor, from the outside in, where the
-			// header really lands under the title.
-			const leaf = anchors[anchors.length - 1];
-			for (const anchor of anchors) {
-				if (anchor.nextElementSibling !== this.headerContainer) anchor.after(this.headerContainer);
-				this._styleHeaderUnderTitle();
-				this._renderHeader();
-				if (this._positionHeaderUnderTitle(leaf) && this._headerUnderTitle(leaf)) {
-					this._acceptTitlePlacement(anchor, leaf);
-					return true;
-				}
-			}
-
-			this._titleRejected = key;
-			this._resetHeaderStyle();
-			// back to where it was: above the bars, or out of the page until the bars exist
-			if (!this._mountHeaderAboveBars()) this.headerContainer.remove();
-			return false;
-		}
-
-		_acceptTitlePlacement(anchor, leaf) {
-			this.headerInFallback = true;
-			this.headerPlacement = 'title';
-			this._badRowTicks = 0;
-			this._titleAnchor = anchor;
-			this._titleLeaf = leaf;
-		}
-
-		/** A header placed by the title text must stay under the title; if it does not, it goes back above the bars. */
-		_checkTitlePlacement() {
-			if (this.headerPlacement !== 'title' || !this.headerContainer.firstChild) {
-				this._badRowTicks = 0;
-				return;
-			}
-			const anchor = this._titleAnchor;
-			const leaf = this._titleLeaf;
-			const alive = !!anchor && !!leaf && document.contains(anchor) && document.contains(leaf) && document.contains(this.headerContainer);
-			if (alive) this._positionHeaderUnderTitle(leaf);
-			if (alive && this._headerUnderTitle(leaf)) {
-				this._badRowTicks = 0;
-				return;
-			}
-			this._badRowTicks += 1;
-			if (this._badRowTicks >= 3) {
-				this._titleRejected = this._titleCandidates().join('|');
-				this._mountHeaderAboveBars();
-			}
-		}
-
-		/** Every few seconds: while the header sits above the bars, look again for the title. */
-		_retryTitleMount() {
-			if (this.headerPlacement !== 'bars' || !this.headerContainer.firstChild) return;
-			this._mountHeaderByTitle();
-		}
-
-		_ensureHeaderVisible() {
-			if (!this.headerContainer || !this.headerContainer.firstChild) {
-				this._hiddenTicks = 0;
-				return;
-			}
-			const shown = document.contains(this.headerContainer) && this.headerContainer.getClientRects().length > 0;
-			if (shown) {
-				this._hiddenTicks = 0;
-				return;
-			}
-			this._hiddenTicks += 1;
-			if (this._hiddenTicks >= 3) {
-				this._hiddenTicks = 0;
-				if (this.headerPlacement === 'title') {
-					this._titleRejected = this._titleCandidates().join('|');
-					this._mountHeaderAboveBars();
-				} else if (!this.headerInFallback) {
-					this._mountHeaderFallback();
-				}
-			}
-		}
-
-		attachHeader() {
-			const trigger = document.querySelector(CC.DOM.CHAT_HEADER_ANCHOR);
-			if (!trigger) {
-				this._mountHeaderFallback();
-				return;
-			}
-			// New header anchors on chat-title-split / chat-title-button / conversation-title; legacy on chat-menu-trigger
-			const testId = trigger.getAttribute('data-testid');
-			const anchor =
-				testId === 'chat-title-split' || testId === 'chat-title-button' || testId === 'conversation-title'
-					? trigger
-					: trigger.closest(CC.DOM.CHAT_PROJECT_WRAPPER) || trigger.parentElement;
-			if (!anchor) return;
-			if (anchor.nextElementSibling !== this.headerContainer) {
-				anchor.after(this.headerContainer);
-			}
-			this.headerInFallback = false;
-			this.headerPlacement = 'anchor';
-			this._resetHeaderStyle();
-			this.headerContainer.style.marginLeft = '12px';
-			this._renderHeader();
-			this.refreshProgressChrome();
 		}
 
 		attachUsageLine() {
 			this._attachUsageLine();
-			// A header waiting for the usage line (fallback mount) can be placed now.
-			if (this.headerContainer && !document.contains(this.headerContainer)) this.attachHeader();
 		}
 
-		// A normal-flow row above the card stays visible in bottom-pinned chat composers.
 		_attachUsageLine() {
 			if (!this.usageLine) return;
 			const box = this._findComposerBox();
@@ -651,7 +282,6 @@
 			this._usageAnchor = box;
 			this.usageLine.classList.add('cc-usageRow--above');
 			if (this.usageLine.nextElementSibling !== box) box.before(this.usageLine);
-			if (this.headerPlacement === 'bars') this._mountHeaderAboveBars();
 			this.refreshProgressChrome();
 		}
 
@@ -680,112 +310,6 @@
 				if (el.matches('fieldset, form')) return el;
 			}
 			return editor.parentElement && editor.parentElement !== document.body ? editor.parentElement : null;
-		}
-
-		setPendingCache(pending) {
-			this.pendingCache = pending;
-			if (this.cacheTimeSpan) {
-				if (pending) {
-					this.cacheTimeSpan.style.color = '';
-				} else {
-					const { boldColor } = this.getProgressChrome();
-					this.cacheTimeSpan.style.color = boldColor;
-				}
-			}
-		}
-
-		setConversationMetrics(metrics) {
-			const { totalTokens, cachedUntil } = metrics || {};
-			this.pendingCache = false;
-			if (!metrics) {
-				// leaving the chat
-				this.conversationTitle = '';
-				this._titleTries = 0;
-				this._titleRejected = '';
-			}
-
-			if (typeof totalTokens !== 'number') {
-				this.lengthDisplay.textContent = '';
-				this.cachedDisplay.textContent = '';
-				this.lastCachedUntilMs = null;
-				this._renderHeader();
-				return;
-			}
-
-			const pct = Math.max(0, Math.min(100, (totalTokens / CC.CONST.CONTEXT_LIMIT_TOKENS) * 100));
-			this.lengthDisplay.textContent = `~${totalTokens.toLocaleString()} tokens`;
-
-			// Mini bar (hide when full - context is definitely compacted by then)
-			const isFull = pct >= 99.5;
-			if (isFull) {
-				this.lengthDisplay.style.opacity = '0.5';
-				this.lengthBar = null;
-				this.lengthGroup.replaceChildren(this.lengthDisplay);
-				if (this.lengthTooltip) {
-					this.lengthTooltip.textContent =
-						"Estimated conversation size\nThe displayed count reached the 200k reference scale.\nCompaction can make this estimate stale; it is not Claude's exact token count.";
-				}
-			} else {
-				this.lengthDisplay.style.opacity = '';
-				const bar = document.createElement('div');
-				bar.className = 'cc-bar cc-bar--mini';
-				this.lengthBar = bar;
-				const fill = document.createElement('div');
-				fill.className = 'cc-bar__fill';
-				fill.style.width = `${pct}%`;
-				bar.appendChild(fill);
-				this.refreshProgressChrome();
-
-				const barContainer = document.createElement('span');
-				barContainer.className = 'cc-miniBarContainer';
-				barContainer.appendChild(bar);
-
-				this.lengthGroup.replaceChildren(this.lengthDisplay, document.createTextNode('\u00A0\u00A0'), barContainer);
-			}
-
-			// Cache timer
-			const now = Date.now();
-			if (typeof cachedUntil === 'number' && cachedUntil > now) {
-				this.lastCachedUntilMs = cachedUntil;
-				const secondsLeft = Math.max(0, Math.ceil((cachedUntil - now) / 1000));
-				const { boldColor } = this.getProgressChrome();
-				this.cacheTimeSpan = Object.assign(document.createElement('span'), {
-					className: 'cc-cacheTime',
-					textContent: formatSeconds(secondsLeft)
-				});
-				this.cacheTimeSpan.style.color = boldColor;
-				this.cachedDisplay.replaceChildren(document.createTextNode('cached for\u00A0'), this.cacheTimeSpan);
-			} else {
-				this.lastCachedUntilMs = null;
-				this.cacheTimeSpan = null;
-				this.cachedDisplay.textContent = '';
-			}
-
-			this._renderHeader();
-			// A header that waited above the bars for its content can now be placed under the title.
-			if (this.headerPlacement === 'bars') this._mountHeaderByTitle();
-		}
-
-		_renderHeader() {
-			this.headerContainer.replaceChildren();
-
-			const hasTokens = !!this.lengthDisplay.textContent;
-			const hasCache = !!this.cachedDisplay.textContent;
-
-			if (!hasTokens) return;
-
-			if (hasCache) {
-				const gap = this.lengthBar ? '\u00A0\u00A0' : '\u00A0';
-				this.headerDisplay.replaceChildren(
-					this.lengthGroup,
-					document.createTextNode(gap),
-					this.cachedDisplay
-				);
-			} else {
-				this.headerDisplay.replaceChildren(this.lengthGroup);
-			}
-
-			this.headerContainer.appendChild(this.headerDisplay);
 		}
 
 		_usageTooltipText(key) {
@@ -867,12 +391,7 @@
 			}
 		}
 
-		/**
-		 * One usage window, three states:
-		 *  - live    { utilization, resets_at }: value and countdown
-		 *  - expired { expired: true }: the reset time passed, nothing used since: 0%, no countdown
-		 *  - unknown (null): no data yet, e.g. the free plan reports usage only with the first reply
-		 */
+
 		_renderWindow({ windowMs, w, pctSpan, resetSpan, fill }) {
 			const live = w && !w.expired && typeof w.utilization === 'number';
 
@@ -964,26 +483,6 @@
 		}
 
 		tick() {
-			this._ensureHeaderVisible();
-			this._checkTitlePlacement();
-			this._ticks += 1;
-			if (this._ticks % 3 === 0) this._retryTitleMount();
-
-			// Cache countdown
-			const now = Date.now();
-			if (this.lastCachedUntilMs && this.lastCachedUntilMs > now) {
-				const secondsLeft = Math.max(0, Math.ceil((this.lastCachedUntilMs - now) / 1000));
-				if (this.cacheTimeSpan) {
-					this.cacheTimeSpan.textContent = formatSeconds(secondsLeft);
-				}
-			} else if (this.lastCachedUntilMs && this.lastCachedUntilMs <= now) {
-				this.lastCachedUntilMs = null;
-				this.cacheTimeSpan = null;
-				this.pendingCache = false;
-				this.cachedDisplay.textContent = '';
-				this._renderHeader();
-			}
-
 			// Reset text is separate so compact mode can hide it without parsing labels.
 			for (const key of ['session', 'weekly']) {
 				const resetMs = this[`${key}ResetMs`];
@@ -994,7 +493,5 @@
 		}
 	}
 
-	CC.ui = {
-		CounterUI
-	};
+	CC.ui = { CounterUI };
 })();

@@ -13,10 +13,6 @@
 		BRIDGE_SCRIPT_ID: 'cc-bridge-script'
 	});
 
-	CC.CONST = Object.freeze({
-		CACHE_WINDOW_MS: 5 * 60 * 1000,
-		CONTEXT_LIMIT_TOKENS: 200000
-	});
 
 	CC.COLORS = Object.freeze({
 		PROGRESS_FILL_DARK: '#2c84db',
