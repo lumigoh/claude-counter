@@ -20,12 +20,6 @@
 				weeklyTip: '7-day usage window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.'
 			};
 
-	const USAGE_TOOLTIP_TAIL =
-		'\n0% without a countdown: the window ended and nothing was used since.\n"no data yet": the limits arrive with your next reply.';
-	const SESSION_TOOLTIP =
-		'5-hour session window.\nThe bar shows your usage.\nThe line marks where you are in the window.' + USAGE_TOOLTIP_TAIL;
-	const WEEKLY_TOOLTIP =
-		'7-day usage window.\nThe bar shows your usage.\nThe line marks where you are in the window.' + USAGE_TOOLTIP_TAIL;
 
 	function formatSeconds(totalSeconds) {
 		const minutes = Math.floor(totalSeconds / 60);
@@ -69,26 +63,27 @@
 		const show = () => {
 			const rect = element.getBoundingClientRect();
 			tooltip.style.opacity = '1';
+			tooltip.style.visibility = 'visible';
 			const tipRect = tooltip.getBoundingClientRect();
 
-			let left = rect.left + rect.width / 2;
-			if (left + tipRect.width / 2 > window.innerWidth) left = window.innerWidth - tipRect.width / 2 - 10;
-			if (left - tipRect.width / 2 < 0) left = tipRect.width / 2 + 10;
-
+			// Keep the entire panel inside the viewport, flipping below its trigger when needed.
+			const left = Math.max(10, Math.min(rect.left + (rect.width - tipRect.width) / 2, window.innerWidth - tipRect.width - 10));
 			let top = rect.top - tipRect.height - topOffset;
-			if (top < 10) top = rect.bottom + 10;
-
+			if (top < 10) top = rect.bottom + topOffset;
+			top = Math.max(10, Math.min(top, window.innerHeight - tipRect.height - 10));
 			tooltip.style.left = `${left}px`;
 			tooltip.style.top = `${top}px`;
-			tooltip.style.transform = 'translateX(-50%)';
+
 		};
 
 		const hide = () => {
 			tooltip.style.opacity = '0';
+			tooltip.style.visibility = 'hidden';
 			clearTimeout(hideTimer);
 		};
 
 		element.addEventListener('pointerdown', (e) => {
+			if (e.pointerType === 'mouse') hide();
 			if (e.pointerType === 'touch' || e.pointerType === 'pen') {
 				pressTimer = setTimeout(() => {
 					show();
@@ -107,6 +102,11 @@
 			if (e.pointerType === 'mouse') show();
 		});
 
+		window.addEventListener('scroll', hide, true);
+		window.addEventListener('resize', hide);
+		window.addEventListener('pointerdown', hide);
+		window.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+
 		element.addEventListener('pointerleave', (e) => {
 			if (e.pointerType === 'mouse') hide();
 		});
@@ -114,7 +114,8 @@
 
 	function makeTooltip(text) {
 		const tip = document.createElement('div');
-		tip.className = 'bg-bg-500 text-text-000 cc-tooltip';
+		tip.className = 'cc-tooltip';
+		tip.setAttribute('role', 'tooltip');
 		tip.textContent = text;
 		const appendTip = () => {
 			const target = document.body || document.documentElement;
@@ -138,7 +139,7 @@
 	// Header under the title: the left padding of the header (the text starts that far in) and how far
 	// up into the title's own box it starts.
 	const HEADER_PAD_PX = 4;
-	const UNDER_OVERLAP_PX = 2;
+	const TITLE_GAP_PX = 6;
 
 	const normText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
 	const hasElementChild = (el) => Array.from(el.children || []).some((c) => c && c.nodeType === 1);
@@ -231,6 +232,7 @@
 			this.headerDisplay.className = 'cc-headerItem';
 
 			this.lengthGroup = document.createElement('span');
+			this.lengthGroup.className = 'cc-lengthGroup';
 			this.lengthDisplay = document.createElement('span');
 			this.cachedDisplay = document.createElement('span');
 			this.cacheTimeSpan = null; // reference to inner time span
@@ -344,7 +346,7 @@
 
 		_setupTooltips() {
 			this.lengthTooltip = makeTooltip(
-				"Approximate tokens (excludes system prompt).\nUses a generic tokenizer, may differ from Claude's count.\nBecomes invalid after context compaction.\nBar scale: 200k tokens (Claude's maximum context length, will compact before then)."
+				"Estimated conversation size\nCounts visible text and tool content, not hidden instructions or images.\nThe tokenizer differs from Claude's; compaction can make this estimate stale.\nBar scale: 200k tokens — a display reference, not your model's confirmed limit."
 			);
 			setupTooltip(
 				this.lengthGroup,
@@ -354,12 +356,12 @@
 
 			setupTooltip(
 				this.cachedDisplay,
-				makeTooltip("Messages sent while cached are significantly cheaper."),
+				makeTooltip("Estimated prompt cache\nFive minutes from the latest assistant reply.\nThis timer is an estimate; cache availability and billing depend on Claude."),
 				{ topOffset: 8 }
 			);
 
 			this.sessionTooltip = makeTooltip(
-				SESSION_TOOLTIP
+				this._usageTooltipText('session')
 			);
 			setupTooltip(
 				this.sessionGroup,
@@ -367,9 +369,10 @@
 				{ topOffset: 8 }
 			);
 
+			this.weeklyTooltip = makeTooltip(this._usageTooltipText('weekly'));
 			setupTooltip(
 				this.weeklyGroup,
-				makeTooltip(WEEKLY_TOOLTIP),
+				this.weeklyTooltip,
 				{ topOffset: 8 }
 			);
 		}
@@ -408,7 +411,6 @@
 		_mountHeaderAboveBars() {
 			const line = this.usageLine;
 			if (!line || !line.parentElement || !this.headerContainer) return false;
-			if (this._usageMode === 'chin') this._placeUsage(this._usageAnchor, this._usageChin, 'afterChin');
 			if (line.previousElementSibling !== this.headerContainer) line.before(this.headerContainer);
 			this._resetHeaderStyle();
 			this.headerContainer.style.paddingLeft = '12px';
@@ -496,7 +498,10 @@
 			const lr = leaf.getBoundingClientRect();
 			const st = this.headerContainer.style;
 			st.left = `${Math.round(lr.left - pr.left - HEADER_PAD_PX)}px`;
-			st.top = `${Math.round(lr.bottom - pr.top - UNDER_OVERLAP_PX)}px`;
+			const top = lr.bottom + TITLE_GAP_PX;
+			const height = this.headerContainer.getBoundingClientRect().height;
+			if (top + height > pr.bottom - 4) return false;
+			st.top = `${Math.round(top - pr.top)}px`;
 			return true;
 		}
 
@@ -506,7 +511,7 @@
 			const lr = leaf.getBoundingClientRect();
 			if (!(hr.width > 0 && hr.height > 0)) return false;
 			if (Math.abs(hr.left - (lr.left - HEADER_PAD_PX)) > 3) return false;
-			if (hr.top < lr.top + lr.height / 2 - 1) return false;
+			if (hr.top < lr.bottom + TITLE_GAP_PX - 1) return false;
 			if (hr.top - lr.bottom > 12) return false;
 			const viewWidth = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : Infinity;
 			return hr.right <= viewWidth + 1;
@@ -627,6 +632,7 @@
 			this.headerInFallback = false;
 			this.headerPlacement = 'anchor';
 			this._resetHeaderStyle();
+			this.headerContainer.style.marginLeft = '12px';
 			this._renderHeader();
 			this.refreshProgressChrome();
 		}
@@ -637,102 +643,19 @@
 			if (this.headerContainer && !document.contains(this.headerContainer)) this.attachHeader();
 		}
 
-		/** The usage bars are in place when they come right after the composer, or after the fallback header that sits there. */
-		_followsComposer(flowChild) {
-			const next = flowChild.nextElementSibling;
-			if (next === this.usageLine) return true;
-			return !!this.headerContainer && next === this.headerContainer && this.headerContainer.nextElementSibling === this.usageLine;
-		}
-
+		// A normal-flow row above the card stays visible in bottom-pinned chat composers.
 		_attachUsageLine() {
 			if (!this.usageLine) return;
 			const box = this._findComposerBox();
 			if (!box || !box.parentElement) return;
 			this._usageAnchor = box;
-			const chin = this._findChin(box);
-			this._placeUsage(box, chin, chin ? 'chin' : 'below');
-			this._fitUsage();
-			this._observeFit();
+			this.usageLine.classList.add('cc-usageRow--above');
+			if (this.usageLine.nextElementSibling !== box) box.before(this.usageLine);
 			if (this.headerPlacement === 'bars') this._mountHeaderAboveBars();
 			this.refreshProgressChrome();
 		}
 
-		_findChin(box) {
-			let next = box.nextElementSibling;
-			while (next && (next === this.usageLine || next === this.headerContainer)) next = next.nextElementSibling;
-			if (!next || box.parentElement === document.body) return null;
-			const style = window.getComputedStyle(next);
-			if (style.display === 'none' || style.position === 'absolute' || style.position === 'fixed') return null;
-			const h = next.getBoundingClientRect().height;
-			return h >= 20 && h <= 90 ? next : null;
-		}
-
-		_placeUsage(box, chin, mode) {
-			const row = this.usageLine;
-			row.classList.toggle('cc-usageRow--chin', mode === 'chin');
-			row.classList.toggle('cc-usageRow--below', mode !== 'chin');
-			if (mode === 'chin') {
-				if (window.getComputedStyle(chin).position === 'static' || !window.getComputedStyle(chin).position) chin.classList.add('cc-usageHost');
-				if (row.parentElement !== chin) chin.appendChild(row);
-				this._usageParent = chin;
-			} else {
-				const after = mode === 'afterChin' && chin ? chin : box;
-				if (!this._followsComposer(after)) after.after(row);
-				this._usageAfter = after;
-				this._usageParent = after.parentElement;
-			}
-			this._usageMode = mode;
-			this._usageChin = chin;
-		}
-
-		// Make sure the row never collides with claude.ai's own chin content.
-		_fitUsage() {
-			const row = this.usageLine;
-			if (!row || !this._usageAnchor?.isConnected || row.classList.contains('cc-hidden')) return;
-			const box = this._usageAnchor;
-			const chin = this._usageChin;
-			row.classList.remove('cc-compact');
-
-			if (!chin || this.headerPlacement === 'bars') {
-				this._placeUsage(box, chin, chin ? 'afterChin' : 'below');
-				return;
-			}
-			if (this._usageMode !== 'chin') this._placeUsage(box, chin, 'chin');
-
-			const collides = () => {
-				const rr = row.getBoundingClientRect();
-				let rightmost = chin.getBoundingClientRect().left;
-				for (const el of chin.querySelectorAll('button, a, [role="tab"], [role="button"]')) {
-					if (row.contains(el)) continue;
-					const r = el.getBoundingClientRect();
-					if (r.width && r.height) rightmost = Math.max(rightmost, r.right);
-				}
-				return rr.left < rightmost + 16 || rr.right > chin.getBoundingClientRect().right;
-			};
-
-			if (!collides()) return;
-			row.classList.add('cc-compact');
-			if (!collides()) return;
-			row.classList.remove('cc-compact');
-			this._placeUsage(box, chin, 'afterChin');
-		}
-
-		_observeFit() {
-			if (this._fitBox === this._usageAnchor && this._fitChin === this._usageChin) return;
-			if (this._fitObserver) this._fitObserver.disconnect();
-			this._fitBox = this._usageAnchor;
-			this._fitChin = this._usageChin;
-			if (!('ResizeObserver' in window) || !this._usageAnchor) return;
-			let raf = 0;
-			this._fitObserver = new ResizeObserver(() => {
-				cancelAnimationFrame(raf);
-				raf = requestAnimationFrame(() => this._fitUsage());
-			});
-			this._fitObserver.observe(this._usageAnchor);
-			if (this._usageChin) this._fitObserver.observe(this._usageChin);
-		}
-
-		_scheduleUsageReattach(delay = 200) {
+		_scheduleUsageReattach(delay = 150) {
 			if (this._usageReattachTimer) return;
 			this._usageReattachTimer = setTimeout(() => {
 				this._usageReattachTimer = null;
@@ -743,11 +666,7 @@
 		_usageMisplaced() {
 			const input = document.querySelector(CC.DOM.CHAT_INPUT);
 			if (!input || !this.usageLine) return false;
-			if (!document.contains(this.usageLine) || !this._usageAnchor?.contains(input)) return true;
-			if (this.usageLine.parentElement !== this._usageParent) return true;
-			if (this._usageMode === 'chin') return this._findChin(this._usageAnchor) !== this._usageChin;
-			if (!this._followsComposer(this._usageAfter)) return true;
-			return this._usageMode === 'below' && !!this._findChin(this._usageAnchor);
+			return !document.contains(this.usageLine) || !this._usageAnchor?.contains(input) || this.usageLine.nextElementSibling !== this._usageAnchor;
 		}
 
 		_findComposerBox() {
@@ -804,7 +723,7 @@
 				this.lengthGroup.replaceChildren(this.lengthDisplay);
 				if (this.lengthTooltip) {
 					this.lengthTooltip.textContent =
-						"Approximate tokens (excludes system prompt).\nUses a generic tokenizer, may differ from Claude's count.\nThis count is invalid after compaction.";
+						"Estimated conversation size\nThe displayed count reached the 200k reference scale.\nCompaction can make this estimate stale; it is not Claude's exact token count.";
 				}
 			} else {
 				this.lengthDisplay.style.opacity = '';
@@ -818,7 +737,7 @@
 				this.refreshProgressChrome();
 
 				const barContainer = document.createElement('span');
-				barContainer.className = 'inline-flex items-center';
+				barContainer.className = 'cc-miniBarContainer';
 				barContainer.appendChild(bar);
 
 				this.lengthGroup.replaceChildren(this.lengthDisplay, document.createTextNode('\u00A0\u00A0'), barContainer);
@@ -869,17 +788,23 @@
 			this.headerContainer.appendChild(this.headerDisplay);
 		}
 
+		_usageTooltipText(key) {
+			const w = this._tooltipUsage?.[key === 'session' ? 'five_hour' : 'seven_day'];
+			const heading = key === 'session' ? `${L.session} quota · 5 hours` : `${L.weekly} quota · 7 days, all models`;
+			if (!w) return `${heading}\nNo data yet. Send a message or click the bars to refresh.`;
+			if (w.expired) return `${heading}\nReset time reached. Refresh to confirm your available quota.`;
+			const pct = Math.round(Math.max(0, Math.min(100, w.utilization)) * 10) / 10;
+			const lines = [heading, `${pct}% used · ${Math.round((100 - pct) * 10) / 10}% remaining`];
+			const resetMs = w.resets_at ? Date.parse(w.resets_at) : NaN;
+			if (Number.isFinite(resetMs)) lines.push(`Resets ${new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (local time)`);
+			lines.push('Fill = usage · tick = time elapsed');
+			if (key === 'session' && this.sessionHistory.length > 1) lines.push(`Recent readings: ${this.sessionHistory.map((v) => `${v}%`).join(' → ')}`);
+			lines.push('Click the bars to refresh.');
+			return lines.join('\n');
+		}
+
 		_updateSessionTooltip() {
-			if (!this.sessionTooltip) return;
-			const baseText = SESSION_TOOLTIP;
-			if (this.sessionHistory && this.sessionHistory.length > 0) {
-				const historyLine = this.sessionHistory
-					.map((v) => (v === 0 ? '0' : `${v}%`))
-					.join(' -> ');
-				this.sessionTooltip.textContent = `${historyLine}\n${baseText}`;
-			} else {
-				this.sessionTooltip.textContent = baseText;
-			}
+			if (this.sessionTooltip) this.sessionTooltip.textContent = this._usageTooltipText('session');
 		}
 
 		_updateSessionHistory(resetsAt, currentPct) {
@@ -895,7 +820,7 @@
 				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
 					history = [...storedHistory];
 				} else {
-					history = currentPct > 0 ? [0, currentPct] : [0];
+					history = [currentPct];
 				}
 
 				const lastVal = history[history.length - 1];
@@ -905,7 +830,7 @@
 						history = history.slice(-5);
 					}
 				} else if (currentPct < lastVal) {
-					history = currentPct > 0 ? [0, currentPct] : [0];
+					history = [currentPct];
 				}
 
 				this.sessionHistory = history;
@@ -915,7 +840,7 @@
 				try {
 					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
 						chrome.storage.local.set({
-							claude_session_history: { resets_at: resetsAt, history }
+							claude_session_history: { version: 2, resets_at: resetsAt, history }
 						});
 					}
 				} catch (e) {
@@ -929,7 +854,7 @@
 					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
 						chrome.storage.local.get(['claude_session_history'], (result) => {
 							const data = result?.claude_session_history;
-							processHistory(data?.resets_at, data?.history);
+							processHistory(data?.version === 2 ? data.resets_at : null, data?.history);
 						});
 					} else {
 						processHistory(null, null);
@@ -957,8 +882,6 @@
 				const resetMs = w.resets_at ? Date.parse(w.resets_at) : null;
 				pctSpan.textContent = `${pct}%`;
 				resetSpan.textContent = resetMs ? ` · ${L.resetsIn} ${formatResetCountdown(resetMs)}` : '';
-				resetSpan.title = resetMs ? new Date(resetMs).toLocaleString() : '';
-				pctSpan.title = resetSpan.title;
 
 				const width = Math.max(0, Math.min(100, rawPct));
 				fill.style.width = `${width}%`;
@@ -970,14 +893,13 @@
 
 			pctSpan.textContent = w && w.expired ? '0%' : 'no data yet';
 			resetSpan.textContent = '';
-			resetSpan.title = '';
-			pctSpan.title = '';
 			fill.style.width = '0%';
 			fill.classList.remove('cc-caution', 'cc-warn', 'cc-full');
 			return { resetMs: null, startMs: null, pct: 0, live: false };
 		}
 
 		setUsage(usage) {
+			this._tooltipUsage = usage;
 			this.refreshProgressChrome();
 
 			// Bars are permanent
@@ -1011,7 +933,8 @@
 			this.weeklyWindowStartMs = weekly.startMs;
 
 			this._updateMarkers();
-			this._fitUsage();
+			this._updateSessionTooltip();
+			this.weeklyTooltip.textContent = this._usageTooltipText('weekly');
 		}
 
 		_updateMarkers() {

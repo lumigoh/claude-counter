@@ -197,10 +197,16 @@ test('U13 leaving a chat clears the header', () => {
 	assert.equal(env.ui.headerContainer.textContent, '');
 });
 
-test('U14 tooltips explain the three states', () => {
+test('U14 tooltips explain the current state without unrelated caveats', () => {
 	const env = createUiEnv();
-	assert.match(env.ui.sessionTooltip.textContent, /no data yet/);
-	assert.match(env.ui.sessionTooltip.textContent, /0% without a countdown/);
+	assert.match(env.ui.sessionTooltip.textContent, /No data yet/);
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at: iso(START + HOUR) }, seven_day: { expired: true } });
+	assert.match(env.ui.sessionTooltip.textContent, /40% used · 60% remaining/);
+	assert.match(env.ui.sessionTooltip.textContent, /local time/);
+	assert.match(env.ui.sessionTooltip.textContent, /Fill = usage · tick = time elapsed/);
+	assert.match(env.ui.weeklyTooltip.textContent, /Reset time reached/);
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /No data yet/);
+	assert.match(env.ui.lengthTooltip.textContent, /not your model's confirmed limit/);
 });
 
 test('U15 clicking the usage line asks for a refresh', async () => {
@@ -215,14 +221,14 @@ test('U08c calling attach again does not shuffle the header and the usage bars',
 	env.ui.attach();
 	env.ui.setConversationMetrics({ totalTokens: 100, cachedUntil: null });
 	const order = () => Array.from(box.parentElement.children).filter((c) => [box, env.ui.headerContainer, env.ui.usageLine].includes(c)).map((c) => c === box ? 'composer' : c === env.ui.headerContainer ? 'header' : 'usage').join(',');
-	assert.equal(order(), 'composer,header,usage');
+	assert.equal(order(), 'header,usage,composer');
 	assert.equal(box.contains(env.ui.usageLine), false, 'usage stays outside the composer controls');
 	for (let i = 0; i < 5; i++) {
 		env.ui.attach();
 		env.ui.attachUsageLine();
 		env.ui.tick();
 		for (const observer of env.dom.observers) observer.cb([]);
-		assert.equal(order(), 'composer,header,usage', `round ${i}`);
+		assert.equal(order(), 'header,usage,composer', `round ${i}`);
 	}
 });
 
@@ -251,8 +257,8 @@ function layOut(env, bar, state) {
 	};
 }
 
-// geometry as recorded on claude.ai: bar 48 px high, title text at x=312, y=14, 20 px high
-const WIDE = () => ({ leaf: { left: 312, top: 14, width: 210, height: 20 }, bar: { left: 296, top: 0, width: 1624, height: 48 }, headerWidth: 250 });
+// Roomy header fixture: bar 64 px high, title text at x=312, y=14, 20 px high
+const WIDE = () => ({ leaf: { left: 312, top: 14, width: 210, height: 20 }, bar: { left: 296, top: 0, width: 1624, height: 64 }, headerWidth: 250 });
 
 function buildTitleBar(env, title = 'Můj rodinný rozpočet') {
 	const doc = env.document;
@@ -369,7 +375,7 @@ test('U20 the usual anchor wins when it exists, and clears the style of the titl
 	assert.equal(env.ui.headerInFallback, false);
 	assert.equal(title.nextElementSibling, env.ui.headerContainer);
 	assert.equal(env.ui.headerContainer.style.display, '');
-	assert.equal(env.ui.headerContainer.style.marginLeft, '');
+	assert.equal(env.ui.headerContainer.style.marginLeft, '12px');
 });
 
 test('U21 the title element is replaced by the page: after a few ticks the header goes above the bars', () => {
@@ -473,7 +479,7 @@ test('U32 the header goes under the title, out of the row, at the start of the t
 	assert.equal(env.ui.headerPlacement, 'title');
 	assert.equal(st.position, 'absolute');
 	assert.equal(st.left, '12px', 'its text starts where the title text starts (312 - 296 - 4 padding)');
-	assert.equal(st.top, '32px', 'right under the title text, inside the 48 px bar');
+	assert.equal(st.top, '40px', 'right under the title text, with a six-pixel gap in the roomy bar');
 });
 
 test('U33 a long title does not matter: the header goes under its start', () => {
@@ -488,12 +494,12 @@ test('U33 a long title does not matter: the header goes under its start', () => 
 
 test('U34 narrow page: the header stays under the title too, the row of the bar is not used', () => {
 	const { env, bar } = setup();
-	const state = { leaf: { left: 312, top: 14, width: 210, height: 20 }, bar: { left: 296, top: 0, width: 538, height: 48 }, headerWidth: 157 };
+	const state = { leaf: { left: 312, top: 14, width: 210, height: 20 }, bar: { left: 296, top: 0, width: 538, height: 64 }, headerWidth: 157 };
 	layOut(env, bar, state);
 	env.ui.setConversationTitle('Můj rodinný rozpočet');
 	assert.equal(env.ui.headerPlacement, 'title');
 	assert.equal(env.ui.headerContainer.style.position, 'absolute');
-	assert.equal(env.ui.headerContainer.style.top, '32px');
+	assert.equal(env.ui.headerContainer.style.top, '40px');
 });
 
 test('U35 the cache timer widens the header: it stays where it is, no switching', () => {
@@ -628,30 +634,24 @@ function responsiveComposer() {
 	return { ...env, box, input, chin, control, wrapper };
 }
 
-test('U57a the usage row fits beside the composer strip controls when there is room', () => {
+test('U57a the usage row stays above the composer and its menus', () => {
 	const env = responsiveComposer();
-	env.ui.usageLine.getBoundingClientRect = () => ({ left: 500, right: 980, width: 480, height: 30 });
 	env.ui.attach();
-	assert.equal(env.ui.usageLine.parentElement, env.chin);
-	assert.equal(env.ui.usageLine.classList.contains('cc-compact'), false);
+	assert.equal(env.ui.usageLine.nextElementSibling, env.box);
+	assert.equal(env.ui.usageLine.parentElement, env.wrapper);
 	assert.equal(env.box.contains(env.ui.usageLine), false);
-});
-
-test('U57b compact mode hides reset text before giving the row its own line', () => {
-	const env = responsiveComposer();
-	env.ui.usageLine.getBoundingClientRect = () => ({ left: env.ui.usageLine.classList.contains('cc-compact') ? 350 : 100, right: 980, width: 880, height: 30 });
-	env.ui.attach();
-	assert.equal(env.ui.usageLine.parentElement, env.chin);
-	assert.equal(env.ui.usageLine.classList.contains('cc-compact'), true);
-});
-
-test('U57c a row that still collides in compact mode goes below the strip', () => {
-	const env = responsiveComposer();
-	env.ui.usageLine.getBoundingClientRect = () => ({ left: 100, right: 980, width: 880, height: 30 });
-	env.ui.attach();
-	assert.equal(env.chin.nextElementSibling, env.ui.usageLine);
-	assert.equal(env.ui.usageLine.classList.contains('cc-usageRow--below'), true);
 	assert.equal(env.ui._usageMisplaced(), false);
+});
+
+test('U57b a relocated model selector does not drag usage below the input', () => {
+	const env = responsiveComposer();
+	env.ui.attach();
+	const model = env.document.createElement('button');
+	model.setAttribute('data-testid', 'model-selector-dropdown');
+	env.chin.appendChild(model);
+	env.ui.attach();
+	assert.equal(env.ui.usageLine.nextElementSibling, env.box);
+	assert.equal(env.chin.contains(env.ui.usageLine), false);
 });
 
 test('U57d page mutations repair a row that was moved inside the input card', async () => {
@@ -661,7 +661,7 @@ test('U57d page mutations repair a row that was moved inside the input card', as
 	env.box.appendChild(env.ui.usageLine);
 	for (const observer of env.dom.observers) observer.cb([]);
 	await env.clock.advance(150);
-	assert.equal(env.ui.usageLine.parentElement, env.chin);
+	assert.equal(env.ui.usageLine.nextElementSibling, env.box);
 });
 
 test('U57e warning colours progress from amber to red and clear for unknown/expired data', () => {
@@ -674,4 +674,37 @@ test('U57e warning colours progress from amber to red and clear for unknown/expi
 	env.ui.setUsage({ five_hour: { expired: true } });
 	assert.equal(env.ui.sessionBarFill.classList.contains('cc-caution'), false);
 	assert.equal(env.ui.sessionBarFill.classList.contains('cc-warn'), false);
+});
+
+
+test('U46 a tight title bar uses the composer summary instead of crowding the title', () => {
+	const { env, bar } = setup();
+	const state = WIDE();
+	state.bar.height = 48;
+	layOut(env, bar, state);
+	env.ui.setConversationTitle('Můj rodinný rozpočet');
+	assert.equal(env.ui.headerPlacement, 'bars');
+	assert.equal(env.ui.headerContainer.nextElementSibling, env.ui.usageLine);
+});
+
+test('U47 tooltips stay within the viewport and dismiss on a click', () => {
+	const env = createUiEnv();
+	env.ui.sessionGroup.getBoundingClientRect = () => ({ left: 1260, top: 2, right: 1360, bottom: 22, width: 100, height: 20 });
+	for (const fn of env.ui.sessionGroup.listeners.pointerenter) fn({ pointerType: 'mouse' });
+	assert.equal(env.ui.sessionTooltip.style.left, '1170px');
+	assert.equal(env.ui.sessionTooltip.style.top, '30px');
+	assert.equal(env.ui.sessionTooltip.style.visibility, 'visible');
+	for (const fn of env.ui.sessionGroup.listeners.pointerdown) fn({ pointerType: 'mouse' });
+	assert.equal(env.ui.sessionTooltip.style.visibility, 'hidden');
+});
+
+
+test('U48 session history labels actual readings without inventing a zero baseline', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } });
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 40% → 45%/);
 });

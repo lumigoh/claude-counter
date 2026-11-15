@@ -6,9 +6,9 @@ A minimal browser extension that shows token count, cache timer, and usage bars 
 
 > Fork of [she-llac/claude-counter](https://github.com/she-llac/claude-counter) v0.4.2, updated for the claude.ai UI redesign (August 2026, 2.0.x) and for the new unified claude.ai interface (October 2026, 2.1.0).
 
-## Personal build 2.1.2
+## Personal build 2.1.3
 
-Includes upstream #60 and #15, plus the responsive composer layout and usage refresh improvements adapted from [#57](https://github.com/she-llac/claude-counter/pull/57). Stream support and empty-answer/failure backoff are preserved. See the [changelog](CHANGELOG.md).
+Includes upstream #60 and #15, plus the responsive composer layout and usage refresh improvements adapted from [#57](https://github.com/she-llac/claude-counter/pull/57). Usage bars sit above the composer to stay clear of its controls and the window edge. Tooltips show current usage and reset times in opaque panels. Stream support and empty-answer/failure backoff are preserved. See the [changelog](CHANGELOG.md).
 
 ## Features
 

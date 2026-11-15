@@ -2,6 +2,16 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.3] - 2026-11-15
+
+### Fixed
+- Tooltips now use their own opaque background, border, readable text and bounded panel sizing instead of relying on Claude's CSS classes. They stay inside the viewport and dismiss on scrolling, resizing, clicking or Escape.
+- Usage bars now occupy a normal-flow row above the input card, keeping them clear of composer menus and the bottom edge in ongoing chats. Narrow layouts wrap and hide inline reset text; full reset details stay in the tooltip.
+- Token estimates have a 12px gap beside recognized titles or a 6px gap below discovered titles. A short title bar uses the summary above the composer instead of squeezing text into the title or content below it.
+- Tooltips show the current percentage used/remaining, local reset time, marker meaning and labeled recent session readings. Missing and expired usage get their own concise messages. Token and cache tooltips now describe estimates without claiming an exact context limit or guaranteed cache savings.
+- Recent session readings now start at the first observed value rather than an invented 0% baseline.
+- Rebuilt the userscript with the same UI fixes. Validation: 137 automated tests pass, plus Chromium checks of opaque/viewport-bounded tooltips, bottom-pinned composer placement, narrow windows, Connect updates and reload persistence against simulated Claude pages.
+
 ## [2.1.2] - 2026-11-15
 
 ### Added

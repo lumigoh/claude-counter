@@ -1,16 +1,19 @@
 /* Header: tokens + cache timer */
 .cc-header {
-	margin-top: 2px;
+	margin-top: 6px;
+	font-size: 12px;
+	line-height: 18px;
+	padding: 2px 4px;
 	user-select: none;
 }
 
-.cc-headerItem {
+.cc-headerItem, .cc-lengthGroup, .cc-miniBarContainer {
+	display: inline-flex;
+	align-items: center;
 	white-space: nowrap;
 }
 
-/* Usage row: session + weekly
-   Design: quiet, compact, tabular. Lives on the right side of claude.ai's strip
-   under the composer (same line as "Manual · Output"), so it adds no height. */
+/* Usage stays above the composer, clear of its menus and the viewport edge. */
 .cc-usageRow {
 	--cc-text: hsl(var(--text-500, 40 3% 47%));
 	--cc-text-strong: hsl(var(--text-300, 40 5% 30%));
@@ -33,24 +36,18 @@
 	--cc-text: hsl(var(--text-400, 40 3% 40%));
 }
 
-/* Overlay on the right of the chin: chin has pt-2 (8px) + a 32px content row */
-.cc-usageRow--chin {
-	position: absolute;
-	top: 8px;
-	right: 12px;
-	height: 32px;
-	z-index: 1;
-}
-
-/* Fallback: own compact line below the composer */
-.cc-usageRow--below {
+/* Normal flow reserves room instead of covering the editor or its controls. */
+.cc-usageRow--above {
 	box-sizing: border-box;
 	justify-content: flex-end;
 	flex-wrap: wrap;
-	row-gap: 4px;
+	row-gap: 6px;
 	width: 100%;
 	min-width: 0;
-	padding: 6px 12px 0;
+	grid-column: 1 / -1;
+	flex: 0 0 auto;
+	padding: 4px 12px;
+	margin: 0 0 8px;
 }
 
 .cc-usageRow--dim {
@@ -81,7 +78,6 @@
 }
 
 .cc-usageText { display: contents; }
-.cc-usageHost { position: relative; }
 
 .cc-usageReset:empty {
 	display: none;
@@ -185,15 +181,27 @@
 /* Tooltips */
 .cc-tooltip {
 	position: fixed;
-	z-index: 9999;
-	padding: 4px 8px;
-	border-radius: 4px;
-	font-size: 12px;
+	z-index: 2147483647;
+	box-sizing: border-box;
+	width: max-content;
+	max-width: min(330px, calc(100vw - 20px));
+	max-height: calc(100vh - 20px);
+	overflow: auto;
+	padding: 10px 12px;
+	border: 1px solid #575753;
+	border-radius: 8px;
+	background: #262624;
+	color: #f5f5f0;
+	box-shadow: 0 4px 20px #0005;
+	font: 12px/1.5 system-ui, sans-serif;
+	text-align: left;
 	white-space: pre-line;
+	overflow-wrap: anywhere;
 	user-select: none;
 	pointer-events: none;
 	opacity: 0;
-	transition: opacity 200ms ease;
+	visibility: hidden;
+	isolation: isolate;
 }
 
 .cc-tooltipTrigger {
@@ -210,5 +218,5 @@
 
 /* Keep a single group within small phone viewports, including long reset text. */
 @media (max-width: 600px) {
-	.cc-usageRow--below .cc-usageReset { display: none; }
+	.cc-usageRow--above .cc-usageReset { display: none; }
 }
