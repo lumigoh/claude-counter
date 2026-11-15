@@ -2,6 +2,15 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.2] - 2026-11-15
+
+### Added
+- Restored userscript installation with a direct install/update link to this fork.
+- Rebuilt the userscript from the shared extension sources, including #60's Connect streams, #15's hidden-tab guard, and #57's responsive layout/refresh behavior. It wraps fetch at document-start and waits for DOM readiness before mounting the UI.
+- Bundled the same tokenizer and its license notice; no external `@require` is needed. Usage snapshots persist in namespaced site-local storage without modifying the page's `chrome` object.
+- Added `npm run build:userscript` and `npm run check:userscript` to keep the standalone artifact synchronized with source changes. `npm test` also checks the generated artifact.
+- Validation: 135 automated tests pass; Chromium smoke checks verify document-start boot, token counting, Connect limits, persistence across reloads and narrow layout against simulated Claude responses.
+
 ## [2.1.1] - 2026-11-15
 
 ### Changed

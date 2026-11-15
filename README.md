@@ -6,7 +6,7 @@ A minimal browser extension that shows token count, cache timer, and usage bars 
 
 > Fork of [she-llac/claude-counter](https://github.com/she-llac/claude-counter) v0.4.2, updated for the claude.ai UI redesign (August 2026, 2.0.x) and for the new unified claude.ai interface (October 2026, 2.1.0).
 
-## Personal build 2.1.1
+## Personal build 2.1.2
 
 Includes upstream #60 and #15, plus the responsive composer layout and usage refresh improvements adapted from [#57](https://github.com/she-llac/claude-counter/pull/57). Stream support and empty-answer/failure backoff are preserved. See the [changelog](CHANGELOG.md).
 
@@ -62,6 +62,14 @@ The update for the August 2026 claude.ai redesign, by [hey-naf](https://github.c
 
 To update, unzip the new version over the old folder and click the reload button of the extension on `chrome://extensions`. Firefox has not been tried with 2.1.0.
 
+**Userscript — Tampermonkey / Violentmonkey**
+
+1. Install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/) in your browser. Enable the browser's userscript permission if your manager requests it.
+2. [Install Claude Counter userscript](https://raw.githubusercontent.com/lumigoh/claude-counter/main/userscript/claude-counter.user.js), then confirm **Install** in your userscript manager.
+3. Reload `claude.ai`. Use either the browser extension or the userscript to avoid duplicate counters.
+
+The userscript includes the current extension's stream support, responsive layout and refresh behavior. It bundles the tokenizer, needs no external `@require` download, and stores usage snapshots in `claude.ai`'s localStorage. Clearing that site's data clears those saved snapshots. Updates come from this fork through your manager's update checks; if you used an older installation, use the install link once to switch its update source.
+
 ## How it works
 
 - Intercepts Claude's API responses to read conversation data and usage info
@@ -73,6 +81,8 @@ To update, unzip the new version over the old folder and click the reload button
 ## Development
 
 Load the repository folder with **Load unpacked** (Developer mode). Run the tests with `npm test` (Node 22, nothing to install).
+
+To update the userscript after changing shared sources, run `npm run build:userscript`. Verify the checked-in script with `npm run check:userscript`.
 
 ## Privacy
 
