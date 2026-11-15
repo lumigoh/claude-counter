@@ -2,7 +2,7 @@
 
 Session and weekly Claude usage bars, with quota percentages, reset countdowns and readable tooltips. A personal build of [she-llac/claude-counter](https://github.com/she-llac/claude-counter), incorporating #60, #15 and adapted #57 improvements.
 
-## Personal build 2.1.6
+## Personal build 2.1.7
 
 The approximate token counter is available again as an **opt-in code flag**, displayed on the left of the existing quota row. It defaults to disabled. The old cache timer, separate summary and 200k reference bar remain archived on the [archive branch](https://github.com/lumigoh/claude-counter/tree/archive/token-summary-v2.1.3).
 
@@ -14,9 +14,11 @@ The count estimates visible conversation history and can be inaccurate after com
 
 - Session (5-hour) and weekly (7-day) quota bars from Claude's native usage responses and live limits.
 - Support for both legacy SSE and the unified interface's Connect/protobuf streams.
-- Local usage persistence, expired-window handling, and distinct unknown/zero states.
+- Organisation-isolated usage persistence, stale-update protection, expired-window handling, and distinct unknown/zero states.
 - Opaque tooltips with usage, remaining quota, local reset time and recent session readings.
 - Refreshes on focus/navigation and periodically while visible, with cooldowns for empty answers and backoff for failures.
+
+Saved quota windows are matched to their exact organisation. Old snapshots that used multiple organisation IDs as aliases are discarded rather than risk mixing quota data; fresh endpoint or live-stream readings repopulate the bars.
 
 Usage sits above the composer, with a soft 40px fade above the row in ongoing chats. The fade follows the composer, matches the page backdrop and lets clicks and scrolling pass through. Bars wait for the visible input card during loading and recover automatically when Claude replaces or hydrates it. A reported overlap with the final lines of chat is being considered separately; [proposed layout fixes](docs/composer-layout-options.md) describe the options.
 

@@ -25,7 +25,6 @@
 			this.turnRevision = 0;
 			this.messageCount = 0;
 			CC.bridge.on('cc:turn_end', () => this._afterTurn());
-			CC.bridge.on('cc:org_detected', () => { if (this.enabled && !this.hasCount) this.refresh(); });
 			const navigate = () => {
 				this.revision++;
 				this.turnRevision++;
@@ -34,6 +33,14 @@
 				this._render();
 				if (this.enabled) this.refresh();
 			};
+			CC.bridge.on('cc:org_detected', (payload) => {
+				if (!payload?.orgId) return;
+				const switched = this.lastOrgId && payload.orgId !== this.lastOrgId;
+				this.lastOrgId = payload.orgId;
+				if (!this.enabled) return;
+				if (switched) navigate();
+				else if (!this.hasCount) this.refresh();
+			});
 			window.addEventListener('cc:urlchange', navigate);
 			window.addEventListener('popstate', navigate);
 			document.addEventListener('click', (event) => {
@@ -79,6 +86,7 @@
 					const orgId = await this.getOrgId();
 					if (!current()) return null;
 					if (!orgId) throw new Error('Organisation unavailable');
+					this.lastOrgId = orgId;
 					const data = await CC.bridge.requestConversation(orgId, chatId);
 					if (!current()) return null;
 					if (!Array.isArray(data?.chat_messages)) throw new Error('Conversation unavailable');

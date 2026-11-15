@@ -5,13 +5,6 @@
 	if (CC.__started) return;
 	CC.__started = true;
 
-	// Every organisation id this page has resolved or seen in the page's own requests. A saved usage
-	// snapshot is matched against any of them, because the id found at start-up (cookie, list of
-	// organisations) is not always the one the page's requests use.
-	const knownOrgIds = new Set();
-	function rememberOrg(id) {
-		if (typeof id === 'string' && id) knownOrgIds.add(id);
-	}
 	function getOrgIdFromCookie() {
 		try {
 			return document.cookie
@@ -28,16 +21,14 @@
 
 		const fromCookie = getOrgIdFromCookie();
 		if (fromCookie) {
-			currentOrgId = fromCookie;
-			rememberOrg(currentOrgId);
+			updateOrgIdIfNeeded(fromCookie);
 			return currentOrgId;
 		}
 
 		try {
 			const lsOrg = localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId');
 			if (lsOrg) {
-				currentOrgId = lsOrg;
-				rememberOrg(currentOrgId);
+				updateOrgIdIfNeeded(lsOrg);
 				return currentOrgId;
 			}
 		} catch {}
@@ -45,9 +36,9 @@
 		try {
 			if (typeof chrome !== 'undefined' && chrome.storage?.local) {
 				const stored = await new Promise((r) => chrome.storage.local.get(['claude_last_org_id'], r));
+				if (currentOrgId) return currentOrgId;
 				if (stored?.claude_last_org_id) {
-					currentOrgId = stored.claude_last_org_id;
-					rememberOrg(currentOrgId);
+					updateOrgIdIfNeeded(stored.claude_last_org_id);
 					return currentOrgId;
 				}
 			}
@@ -57,12 +48,12 @@
 			const res = await fetch('https://claude.ai/api/organizations', { credentials: 'include' });
 			if (res.ok) {
 				const orgs = await res.json();
+				if (currentOrgId) return currentOrgId;
 				if (Array.isArray(orgs) && orgs.length > 0) {
 					const activeOrg = orgs.find((o) => o?.active) || orgs[0];
 					const id = activeOrg?.id || activeOrg?.uuid;
 					if (id) {
-						currentOrgId = id;
-						rememberOrg(currentOrgId);
+						updateOrgIdIfNeeded(id);
 						if (typeof chrome !== 'undefined' && chrome.storage?.local) {
 							chrome.storage.local.set({ claude_last_org_id: id });
 						}
@@ -184,6 +175,11 @@
 	}
 
 	let currentOrgId = null;
+	let orgRevision = 0;
+	const windowFreshness = {
+		five_hour: { revision: 0, resetMs: null },
+		seven_day: { revision: 0, resetMs: null }
+	};
 
 	// Usage state: one entry per window. A window is either live ({ utilization, resets_at, ... }),
 	// expired ({ expired: true }: its reset time has passed, nothing was used since) or null (never seen).
@@ -231,60 +227,102 @@
 			const resetMs = windowResetMs(usageState[key]);
 			if (resetMs !== null && now >= resetMs) {
 				usageState[key] = { expired: true };
+				windowFreshness[key].revision++;
 				changed = true;
 			}
 		}
 		return changed;
 	}
 
-	function applyUsageUpdate(normalized, source) {
-		if (!normalized) return;
+	function applyUsageUpdate(normalized, source, request = null) {
+		if (!normalized) return false;
 		const now = Date.now();
 		const previous = usageState || { five_hour: null, seven_day: null };
+		const accepted = {};
+		for (const key of USAGE_WINDOW_KEYS) {
+			const value = normalized[key];
+			if (!value || (source === 'cache' && previous[key])) continue;
+			const meta = windowFreshness[key];
+			const resetMs = windowResetMs(value);
+			// A retired window cannot replace the new one, even if its response arrives later.
+			if (resetMs !== null && meta.resetMs !== null && Math.floor(resetMs / 1000) < Math.floor(meta.resetMs / 1000) && resetMs <= now) continue;
+			if (request && request.revisions[key] !== meta.revision) {
+				// The response was started before this window received a live update or expired.
+				// A provably new window is still useful once the previous reset time has passed.
+				const newWindow = resetMs !== null && meta.resetMs !== null && now >= meta.resetMs && Math.floor(resetMs / 1000) > Math.floor(meta.resetMs / 1000);
+				if (!newWindow) continue;
+			}
+			accepted[key] = value;
+			// Restored snapshots are a display fallback, not evidence that an in-flight poll is stale.
+			if (source !== 'cache') meta.revision++;
+			if (resetMs !== null) meta.resetMs = resetMs;
+		}
+		if (!Object.keys(accepted).length) return false;
+		usageState = { ...previous, ...accepted };
 		lastUsageUpdateMs = now;
-		// A window missing from an update keeps what we know: the free plan's /usage reports nothing
-		// even while a window is live, and a limits event may carry only one window.
-		usageState = {
-			five_hour: normalized.five_hour || previous.five_hour,
-			seven_day: normalized.seven_day || previous.seven_day
-		};
 		expireWindows(now);
 		if (source === 'cache') {
-			// A saved window that ended while the page was closed is stale: ask for fresh data right away.
 			if (USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
 		} else {
 			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
 		if (source !== 'cache') persistUsage();
 		ui.setUsage(usageState);
+		return true;
 	}
 
 	function updateOrgIdIfNeeded(newOrgId) {
-		if (newOrgId && typeof newOrgId === 'string') {
-			rememberOrg(newOrgId);
-			if (newOrgId !== currentOrgId) currentOrgId = newOrgId;
+		if (!newOrgId || typeof newOrgId !== 'string' || newOrgId === currentOrgId) return;
+		const switching = !!currentOrgId;
+		currentOrgId = newOrgId;
+		orgRevision++;
+		for (const meta of Object.values(windowFreshness)) {
+			meta.revision++;
+			meta.resetMs = null;
+		}
+		if (switching) {
+			// Quotas belong to an organisation, even when two IDs appeared in the same tab.
+			usageState = null;
+			lastUsageUpdateMs = 0;
+			lastUsageFetchMs = 0;
+			usageEndpointHasData = false;
+			usageEndpointEmpty = false;
+			usageFailures = 0;
+			lastRestore = { org: null, at: 0 };
+			nextUsageAttemptMs = Date.now();
+			ui.setUsage(null);
 		}
 	}
 
-	// Persist the last usage snapshot so the bars survive reloads (the /usage endpoint returns
-	// nothing on the free plan until the next reply brings the limits).
+	const usageStorageKey = (orgId) => `claude_usage_state:${orgId}`;
+
 	async function persistUsage() {
 		try {
 			if (typeof chrome === 'undefined' || !chrome.storage?.local || !usageState) return;
+			const revision = orgRevision;
+			const snapshot = usageState;
 			const orgId = await getOrgId();
-			if (!orgId) return;
-			const orgIds = Array.from(new Set([orgId, ...knownOrgIds])).slice(0, 4);
-			chrome.storage.local.set({ claude_usage_state: { orgId, orgIds, usage: usageState } });
+			if (!orgId || revision !== orgRevision || orgId !== currentOrgId) return;
+			chrome.storage.local.set({ [usageStorageKey(orgId)]: { version: 2, orgId, usage: snapshot } });
 		} catch {
 			// ignore
 		}
 	}
 
-	function readStoredUsage() {
+	function readStoredUsage(orgId) {
 		return new Promise((resolve) => {
 			try {
 				if (typeof chrome === 'undefined' || !chrome.storage?.local) return resolve(null);
-				chrome.storage.local.get(['claude_usage_state'], (result) => resolve(result?.claude_usage_state || null));
+				const key = usageStorageKey(orgId);
+				chrome.storage.local.get([key, 'claude_usage_state'], (result) => {
+					const scoped = result?.[key];
+					if (scoped?.version === 2 && scoped.orgId === orgId) return resolve(scoped);
+					// Only migrate a legacy snapshot with one unambiguous owner. Old aliases may
+					// already contain mixed windows, even when their primary orgId matches.
+					const legacy = result?.claude_usage_state;
+					const unambiguous = !Array.isArray(legacy?.orgIds) || legacy.orgIds.every((id) => id === orgId);
+					resolve(legacy?.orgId === orgId && unambiguous ? legacy : null);
+				});
 			} catch {
 				resolve(null);
 			}
@@ -294,10 +332,7 @@
 	const usageMissing = () => !usageState || USAGE_WINDOW_KEYS.some((key) => !usageState[key]);
 	let lastRestore = { org: null, at: 0 };
 
-	// The saved snapshot belongs to one account. The organisation is resolved the same way as for
-	// every request (not from the cookie alone: it may be unreadable); the snapshot matches when it
-	// was saved under this id or under any id seen on the page together with it. Windows the page
-	// already knows (from a limits event) are kept; only missing ones are filled in from the snapshot.
+	// Restore only this organisation's missing windows, preserving any newer live readings.
 	async function restoreUsageIfNeeded() {
 		if (!usageMissing()) return true;
 		const orgId = await getOrgId();
@@ -306,17 +341,18 @@
 		if (lastRestore.org === orgId && now - lastRestore.at < 5000) return false;
 		lastRestore = { org: orgId, at: now };
 
-		const entry = await readStoredUsage();
+		const revision = orgRevision;
+		const entry = await readStoredUsage(orgId);
+		if (revision !== orgRevision || orgId !== currentOrgId) return false;
 		const cached = entry?.usage;
-		const aliases = Array.isArray(entry?.orgIds) ? entry.orgIds : [];
-		const matches = !!entry && (entry.orgId === orgId || aliases.includes(orgId) || [...knownOrgIds].some((id) => id === entry.orgId || aliases.includes(id)));
-		if (!cached || !matches) return false;
+		if (!cached) return false;
 		const fill = {};
 		for (const key of USAGE_WINDOW_KEYS) {
 			if ((!usageState || !usageState[key]) && cached[key]) fill[key] = cached[key];
 		}
 		if (!fill.five_hour && !fill.seven_day) return false;
 		applyUsageUpdate({ five_hour: fill.five_hour || null, seven_day: fill.seven_day || null }, 'cache');
+		persistUsage(); // Migrate a safe legacy snapshot into organisation-scoped storage.
 		return true;
 	}
 
@@ -331,6 +367,7 @@
 
 		if (usageFetchInFlight) return;
 		usageFetchInFlight = true;
+		const request = { orgId, orgRevision, revisions: Object.fromEntries(USAGE_WINDOW_KEYS.map((key) => [key, windowFreshness[key].revision])) };
 		let raw = null;
 		try {
 			raw = await CC.bridge.requestUsage(orgId);
@@ -348,6 +385,11 @@
 			usageFetchInFlight = false;
 		}
 
+		if (request.orgRevision !== orgRevision || request.orgId !== currentOrgId) {
+			nextUsageAttemptMs = Math.min(nextUsageAttemptMs, Date.now());
+			return;
+		}
+
 		if (!raw || typeof raw !== 'object') {
 			usageFailures += 1;
 			nextUsageAttemptMs = Date.now() + Math.min(USAGE_RETRY_MS * 2 ** (usageFailures - 1), USAGE_POLL_MS);
@@ -362,7 +404,12 @@
 		usageEndpointEmpty = !parsed;
 		usageEndpointHasData = !!parsed;
 		if (!parsed) return;
-		applyUsageUpdate(parsed, 'usage');
+		nextUsageAttemptMs = Date.now() + ACTIVE_USAGE_POLL_MS;
+		const applied = applyUsageUpdate(parsed, 'usage', request);
+		if (!applied && USAGE_WINDOW_KEYS.some((key) => usageState?.[key]?.expired)) {
+			// A stale poll must not postpone rollover recovery for an hour.
+			nextUsageAttemptMs = Date.now() + USAGE_RETRY_MS;
+		}
 	}
 
 	// Extra refreshes share the failure/empty-answer cooldown with the periodic poll.
@@ -381,7 +428,8 @@
 	});
 	window.addEventListener('focus', () => refreshUsageIfStale(60 * 1000));
 
-	function handleMessageLimit(messageLimit) {
+	function handleMessageLimit(messageLimit, meta) {
+		if (meta?.orgId && currentOrgId && meta.orgId !== currentOrgId) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
 	}

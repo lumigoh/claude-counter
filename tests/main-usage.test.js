@@ -109,7 +109,7 @@ test('M03 limits from a reply: bars get the values, they are saved with the orga
 	assert.equal(Math.round(u.seven_day.utilization), 10);
 	assert.equal(u.five_hour.resets_at, new Date(START + HOUR).toISOString());
 
-	const saved = env.stored('claude_usage_state');
+	const saved = env.stored(`claude_usage_state:${ORG}`);
 	assert.equal(saved.orgId, ORG);
 	assert.equal(Math.round(saved.usage.five_hour.utilization), 20);
 
@@ -170,7 +170,7 @@ test('M05 a window that ends shows 0% (expired), the other one stays, the old va
 	await env.clock.advance(5 * MIN);
 	assert.deepEqual(env.lastUsage().five_hour, { expired: true });
 	assert.equal(Math.round(env.lastUsage().seven_day.utilization), 25);
-	assert.deepEqual(env.stored('claude_usage_state').usage.five_hour, { expired: true });
+	assert.deepEqual(env.stored(`claude_usage_state:${ORG}`).usage.five_hour, { expired: true });
 });
 
 test('M05b both windows can end, and a new reply starts a fresh window', async () => {
@@ -224,7 +224,7 @@ test('M07 /usage with nothing in it never wipes what is known or saved', async (
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
 	await env.clock.advance(61 * MIN); // an hourly refresh happens
 	assert.ok(env.calls.usageRequests.length >= 1);
-	assert.ok(env.stored('claude_usage_state').usage.seven_day, 'still saved');
+	assert.ok(env.stored(`claude_usage_state:${ORG}`).usage.seven_day, 'still saved');
 	assert.equal(env.lastUsage().seven_day.utilization, 12);
 });
 
@@ -256,11 +256,11 @@ const snapshot = (orgFields) => ({
 	usage: { five_hour: liveWindow(71, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) }
 });
 
-test('M17 a snapshot saved under another id of the same account is restored (aliases)', async () => {
+test('M17 legacy aliases cannot authorize another organisation snapshot', async () => {
 	const saved = snapshot({ orgId: OTHER_ORG, orgIds: [OTHER_ORG, ORG] });
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
-	assert.equal(env.lastUsage().five_hour.utilization, 71);
-	assert.equal(env.lastUsage().seven_day.utilization, 12);
+	assert.equal(env.lastUsage(), undefined);
+	assert.equal(env.calls.usageRequests.length, 1);
 });
 
 test('M17b a snapshot of a different account is not shown', async () => {
@@ -276,7 +276,7 @@ test('M18 windows the page does not know are filled in from the snapshot, known 
 	assert.equal(env.lastUsage().five_hour.utilization, 20);
 	assert.equal(env.lastUsage().seven_day, null);
 
-	env.chrome.storage.local.set({ claude_usage_state: snapshot({ orgId: ORG, orgIds: [ORG] }) });
+	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, ...snapshot({ orgId: ORG }) } });
 	await env.clock.flush();
 	await env.clock.advance(11000);
 	assert.equal(env.lastUsage().seven_day.utilization, 12, 'weekly filled in from the snapshot');
@@ -287,32 +287,36 @@ test('M18b the restore retry stops after two minutes', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: null }));
 	await env.clock.advance(3 * MIN);
-	env.chrome.storage.local.set({ claude_usage_state: snapshot({ orgId: ORG, orgIds: [ORG] }) });
+	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, ...snapshot({ orgId: ORG }) } });
 	await env.clock.flush();
 	await env.clock.advance(30000);
 	assert.equal(env.lastUsage().seven_day, null);
 });
 
-test('M19 the snapshot is saved with every id seen on the page', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, cookie: `lastActiveOrg=${ORG}`, usage: emptyUsage });
-	await env.emit('cc:org_detected', { orgId: OTHER_ORG });
-	await env.emit('cc:message_limit', limitsEvent(START));
+test('M19 each organisation persists only its own windows, including partial updates', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
 	await env.clock.flush();
-	const saved = env.stored('claude_usage_state');
-	assert.ok(saved.orgIds.includes(ORG) && saved.orgIds.includes(OTHER_ORG), JSON.stringify(saved.orgIds));
-	assert.equal(saved.orgId, OTHER_ORG);
+	await env.emit('cc:org_detected', { orgId: OTHER_ORG });
+	assert.equal(env.lastUsage(), null, 'old quota is removed immediately');
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: null, sevenD: [0.05, 86400] }), { orgId: OTHER_ORG });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour, null, 'the missing session window is not filled from another organisation');
+	assert.equal(env.stored(`claude_usage_state:${ORG}`).usage.five_hour.utilization, 40);
+	assert.equal(env.stored(`claude_usage_state:${OTHER_ORG}`).usage.five_hour, null);
+	assert.equal(env.stored(`claude_usage_state:${OTHER_ORG}`).usage.seven_day.utilization, 5);
 });
 
-test('M20 reload on the other id: the account is recognised through the saved aliases', async () => {
-	// first page load: the page's own requests use the other id, the cookie says ORG
-	const first = await createMainEnv({ storage: orgStored, startMs: START, cookie: `lastActiveOrg=${ORG}`, usage: emptyUsage });
+test('M20 a reload waits for the actual organisation instead of reusing another ID as an alias', async () => {
+	const first = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
 	await first.emit('cc:org_detected', { orgId: OTHER_ORG });
-	await first.emit('cc:message_limit', limitsEvent(START));
+	await first.emit('cc:message_limit', limitsEvent(START), { orgId: OTHER_ORG });
 	await first.clock.flush();
-	const saved = first.stored('claude_usage_state');
-
-	// second page load starts with the cookie id only, before any request reveals the other one
-	const second = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START + MIN, cookie: `lastActiveOrg=${ORG}`, usage: emptyUsage });
+	const saved = first.stored(`claude_usage_state:${OTHER_ORG}`);
+	const second = await createMainEnv({ storage: { ...orgStored, [`claude_usage_state:${OTHER_ORG}`]: saved }, startMs: START + MIN, cookie: `lastActiveOrg=${ORG}`, usage: emptyUsage });
+	assert.equal(second.lastUsage(), undefined, 'the cookie organisation does not inherit the other one');
+	await second.emit('cc:org_detected', { orgId: OTHER_ORG });
+	await second.clock.flush();
 	assert.equal(second.lastUsage().five_hour.utilization, 20);
 	assert.equal(second.lastUsage().seven_day.utilization, 10);
 });
@@ -463,4 +467,173 @@ test('M27 an enabled counter retries when the organisation is discovered after s
 	await env.emit('cc:org_detected', { orgId: ORG });
 	await env.clock.flush();
 	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 77);
+});
+
+async function pendingUsage(env) {
+	let complete;
+	env.answers.usage = () => new Promise((resolve) => { complete = resolve; });
+	const done = env.calls.uiOpts.onUsageRefresh();
+	await env.clock.flush();
+	return { done, complete: (value) => complete(value) };
+}
+
+test('F01 a late poll cannot lower a newer live reading, even within the same millisecond', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	const poll = await pendingUsage(env);
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	poll.complete({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() }, seven_day: { utilization: 12, resets_at: new Date(START + 24 * HOUR).toISOString() } });
+	await poll.done;
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	assert.equal(env.lastUsage().seven_day.utilization, 12, 'the untouched weekly window still accepts the poll');
+	assert.equal(env.stored(`claude_usage_state:${ORG}`).usage.five_hour.utilization, 40);
+	assert.equal(env.clock.now, START, 'a clock timestamp alone cannot distinguish these updates');
+});
+
+test('F02 a fresh poll can apply a real downward correction, including a revised future reset time', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 7200], sevenD: null }));
+	env.answers.usage = async () => ({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } });
+	await env.calls.uiOpts.onUsageRefresh();
+	assert.equal(env.lastUsage().five_hour.utilization, 39, 'there is no blanket maximum clamp');
+	assert.equal(env.lastUsage().five_hour.resets_at, new Date(START + HOUR).toISOString());
+});
+
+test('F03 a window that ended while a poll was pending can accept a genuinely new window', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, 1], sevenD: null }));
+	const poll = await pendingUsage(env);
+	await env.clock.advance(2000);
+	assert.equal(env.lastUsage().five_hour.expired, true);
+	poll.complete({ five_hour: { utilization: 1, resets_at: new Date(START + HOUR).toISOString() } });
+	await poll.done;
+	assert.equal(env.lastUsage().five_hour.utilization, 1);
+});
+
+test('F04 an old-window poll arriving after expiry keeps the expired state and retries within a minute', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, 1], sevenD: null }));
+	const poll = await pendingUsage(env);
+	await env.clock.advance(2000);
+	poll.complete({ five_hour: { utilization: 90, resets_at: new Date(START + 1000).toISOString() } });
+	await poll.done;
+	assert.equal(env.lastUsage().five_hour.expired, true);
+	const requests = env.calls.usageRequests.length;
+	env.answers.usage = async () => ({ five_hour: { utilization: 1, resets_at: new Date(START + HOUR).toISOString() } });
+	await env.clock.advance(MIN + 1000);
+	assert.ok(env.calls.usageRequests.length > requests);
+	assert.equal(env.lastUsage().five_hour.utilization, 1);
+});
+
+test('F05 stale events for a retired window cannot erase a live new window', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.02, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, -1], sevenD: null }));
+	assert.equal(env.lastUsage().five_hour.utilization, 2);
+});
+
+test('F06 old organisation polls and labelled stream events are ignored after switching', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	const poll = await pendingUsage(env);
+	await env.emit('cc:org_detected', { orgId: OTHER_ORG });
+	poll.complete({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } });
+	await poll.done;
+	assert.equal(env.lastUsage(), null, 'switching removes the previous organisation quota');
+	env.answers.usage = async () => ({ five_hour: { utilization: 5, resets_at: new Date(START + HOUR / 2).toISOString() } });
+	await env.calls.uiOpts.onUsageRefresh();
+	assert.equal(env.lastUsage().five_hour.utilization, 5);
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.42, 3600], sevenD: null }), { orgId: ORG });
+	assert.equal(env.lastUsage().five_hour.utilization, 5);
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.06, 1800], sevenD: null }), { orgId: OTHER_ORG });
+	assert.equal(env.lastUsage().five_hour.utilization, 6);
+});
+
+test('F07 precision differences in reset timestamps do not reject a live update for the same window', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => ({ five_hour: { utilization: 40, resets_at: new Date(START + HOUR + 500).toISOString() } }) });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.41, 3600], sevenD: null }));
+	assert.equal(env.lastUsage().five_hour.utilization, 41);
+});
+
+test('F08 direct-fetch fallback retains the original poll freshness boundary', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	let complete;
+	env.answers.usage = async () => { throw new Error('bridge timeout'); };
+	env.context.fetch = async () => new Promise((resolve) => { complete = resolve; });
+	const done = env.calls.uiOpts.onUsageRefresh();
+	await env.clock.flush();
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	complete({ ok: true, json: async () => ({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } }) });
+	await done;
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+});
+
+test('F14 a cache restore during a poll cannot outrank the fresh endpoint answer', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.clock.advance(6000);
+	const poll = await pendingUsage(env);
+	env.chrome.storage.local.set({ claude_usage_state: { orgId: ORG, usage: { five_hour: liveWindow(40, START + HOUR) } } });
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	poll.complete({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } });
+	await poll.done;
+	assert.equal(env.lastUsage().five_hour.utilization, 39);
+});
+
+test('F15 a previously mixed legacy snapshot is rejected even when its primary owner matches', async () => {
+	const saved = snapshot({ orgId: ORG, orgIds: [ORG, OTHER_ORG] });
+	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
+	assert.equal(env.lastUsage(), undefined);
+	assert.equal(env.calls.usageRequests.length, 1);
+});
+
+test('F16 a single-owner legacy snapshot migrates into scoped storage without a network request', async () => {
+	const saved = snapshot({ orgId: ORG, orgIds: [ORG] });
+	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 71);
+	assert.equal(env.stored(`claude_usage_state:${ORG}`).version, 2);
+	assert.equal(env.calls.usageRequests.length, 0);
+});
+
+test('F17 switching back restores only that organisation quota', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => ({ five_hour: liveWindow(40, START + HOUR) }) });
+	await env.emit('cc:org_detected', { orgId: OTHER_ORG });
+	env.answers.usage = async () => ({ five_hour: liveWindow(10, START + HOUR) });
+	await env.calls.uiOpts.onUsageRefresh();
+	assert.equal(env.lastUsage().five_hour.utilization, 10);
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	assert.equal(env.stored(`claude_usage_state:${OTHER_ORG}`).usage.five_hour.utilization, 10);
+});
+
+test('F18 delayed discovery from stored settings cannot overwrite a newly detected organisation', async () => {
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
+	const get = env.chrome.storage.local.get;
+	let finish;
+	env.chrome.storage.local.get = (keys, callback) => {
+		if (keys.includes('claude_last_org_id')) finish = callback;
+		else get(keys, callback);
+	};
+	const done = env.calls.uiOpts.onUsageRefresh();
+	await env.clock.flush();
+	await env.emit('cc:org_detected', { orgId: OTHER_ORG });
+	finish({ claude_last_org_id: ORG });
+	await done;
+	assert.equal(env.calls.usageRequests.at(-1).orgId, OTHER_ORG);
+});
+
+test('F19 an enabled token count discards a previous organisation response too', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage, showTokenCounter: true });
+	let finish;
+	env.answers.conversation = async (orgId) => orgId === ORG ? new Promise((resolve) => { finish = resolve; }) : { chat_messages: [{}], fakeTokens: 25 };
+	const old = env.calls.uiOpts.onTokenCounterRefresh();
+	await env.clock.flush();
+	await env.emit('cc:org_detected', { orgId: OTHER_ORG });
+	await env.clock.flush();
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 25);
+	finish({ chat_messages: [{}], fakeTokens: 999 });
+	await old;
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 25);
 });

@@ -16,6 +16,19 @@
 
 	// Capture original fetch before anyone else can wrap it
 	const originalFetch = window.fetch;
+	let activeOrgId = null;
+	let orgEpoch = 0;
+	function rememberOrg(id) {
+		if (!id) return;
+		if (activeOrgId && activeOrgId !== id) orgEpoch++;
+		activeOrgId = id;
+	}
+	function streamScope() {
+		if (!activeOrgId) {
+			try { rememberOrg((document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1]); } catch {}
+		}
+		return { orgId: activeOrgId, epoch: orgEpoch };
+	}
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -47,27 +60,29 @@
 		// Detect and broadcast active orgId from any Claude API requests
 		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
 		if (orgMatch && orgMatch[1]) {
+			rememberOrg(orgMatch[1]);
 			post('cc:org_detected', { orgId: orgMatch[1] });
 		}
 
+		const scope = streamScope();
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
 		if (contentType.includes('event-stream')) {
-			handleEventStream(response, method === 'POST' && /\/(?:retry_)?completion(?:[/?]|$)/.test(url));
+			handleEventStream(response, method === 'POST' && /\/(?:retry_)?completion(?:[/?]|$)/.test(url), scope);
 			if (method === 'POST') post('cc:stream_started', {});
 		}
 
 		// New interface: Connect stream carrying the same limit data in protobuf frames.
 		if (url && url.includes(RPC_STREAM_TIMELINE)) {
-			handleConnectStream(response);
+			handleConnectStream(response, scope);
 		}
 
 		return response;
 	};
 
-	function post(type, payload) {
-		window.postMessage({ cc: CC_MARKER, type, payload }, '*');
+	function post(type, payload, meta) {
+		window.postMessage({ cc: CC_MARKER, type, payload, ...(meta ? { meta } : {}) }, '*');
 	}
 
 	function postResponse(requestId, ok, payload, error) {
@@ -94,7 +109,7 @@
 		return '';
 	}
 
-	async function handleEventStream(response, announceTurnEnd = false) {
+	async function handleEventStream(response, announceTurnEnd = false, scope) {
 		try {
 			const cloned = response.clone();
 			const reader = cloned.body?.getReader?.();
@@ -117,7 +132,7 @@
 						const json = JSON.parse(raw);
 						const limits = json?.message_limit || (json?.type === 'message_limit' ? json : null);
 						if (limits && typeof limits === 'object') {
-							post('cc:message_limit', limits);
+							if (!scope || scope.epoch === orgEpoch) post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
 						}
 					} catch {
 						// ignore
@@ -403,16 +418,46 @@
 		return null;
 	}
 
-	function isReplayedEvent(bytes) {
+	const windowCursors = new Map();
+	const MAX_WINDOW_CURSORS = 128;
+	function parsedCursor(id) {
+		const match = typeof id === 'string' && id.match(/^(\d+)-(\d+)$/);
+		return match ? [BigInt(match[1]), BigInt(match[2])] : null;
+	}
+	function olderOrEqual(a, b) {
+		return a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
+	}
+	function freshLimits(bytes, limits, scope) {
+		if (scope && scope.epoch !== orgEpoch) return null;
+		const epoch = scope?.epoch ?? orgEpoch;
 		const id = eventIdOf(bytes);
-		if (!id) return false;
-		if (seenEventIds.has(id)) return true;
-		seenEventIds.add(id);
-		if (seenEventIds.size > MAX_SEEN_EVENTS) seenEventIds.delete(seenEventIds.values().next().value);
-		return false;
+		const seenKey = JSON.stringify([epoch, id]);
+		if (id && seenEventIds.has(seenKey)) return null;
+		if (id) {
+			seenEventIds.add(seenKey);
+			if (seenEventIds.size > MAX_SEEN_EVENTS) seenEventIds.delete(seenEventIds.values().next().value);
+		}
+		const cursor = parsedCursor(id);
+		if (!cursor) return limits;
+		const windows = {};
+		for (const [key, value] of Object.entries(limits.windows)) {
+			const windowKey = JSON.stringify([epoch, key]);
+			const previous = windowCursors.get(windowKey);
+			if (previous && olderOrEqual(cursor, previous.cursor)) {
+				// Reset identifiers may be missing or corrected. Only a provably new window
+				// can bypass the previous cursor; changing a future timestamp is not enough.
+				const newWindow = Number.isFinite(previous.resetsAt) && Number.isFinite(value.resets_at) && previous.resetsAt <= Date.now() / 1000 && value.resets_at > previous.resetsAt;
+				if (!newWindow) continue;
+			}
+			windows[key] = value;
+			windowCursors.delete(windowKey);
+			windowCursors.set(windowKey, { cursor, resetsAt: value.resets_at });
+		}
+		while (windowCursors.size > MAX_WINDOW_CURSORS) windowCursors.delete(windowCursors.keys().next().value);
+		return Object.keys(windows).length ? { ...limits, windows } : null;
 	}
 
-	async function processConnectFrame(flags, payload) {
+	async function processConnectFrame(flags, payload, scope) {
 		if (flags & 0x02) return; // end of stream (JSON trailer or error)
 		let bytes = payload;
 		if (flags & 0x01) {
@@ -420,15 +465,15 @@
 			bytes = await gunzip(payload);
 			if (!bytes) return;
 		}
-		const limits = extractLimits(bytes);
+		const parsed = extractLimits(bytes);
+		const limits = parsed && freshLimits(bytes, parsed, scope);
 		if (limits) {
-			if (isReplayedEvent(bytes)) return;
-			post('cc:message_limit', limits);
+			post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
 			post('cc:turn_end', {});
 		}
 	}
 
-	async function handleConnectStream(response) {
+	async function handleConnectStream(response, scope) {
 		try {
 			const cloned = response.clone();
 			const reader = cloned.body?.getReader?.();
@@ -436,7 +481,7 @@
 
 			let chain = Promise.resolve();
 			const parser = createConnectParser((flags, payload) => {
-				chain = chain.then(() => processConnectFrame(flags, payload)).catch(() => {});
+				chain = chain.then(() => processConnectFrame(flags, payload, scope)).catch(() => {});
 			});
 
 			while (true) {

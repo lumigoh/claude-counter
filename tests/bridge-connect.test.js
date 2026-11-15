@@ -170,7 +170,7 @@ test('T08b the SSE handler is not invoked for StreamTimeline even if a frame loo
 });
 
 test('T10 repeated limits events: delivered each time, identical values are fine, empty ones are ignored', async () => {
-	const frames = [frame('limits_5h_first'), frame('limits_7d_first'), frame('limits_5h_first_turn2')];
+	const frames = [1, 2, 3].map((n) => proto.connectFrame(0, proto.limitsPayload({ cursor: `1791743600000-${n}`, windows: [['5h', 1, 1791749400, 0.76], ['7d', 1, 1791990000, 0.25]] })));
 	const { env } = await runStream(frames);
 	assert.equal(limits(env).length, 3);
 	for (const m of limits(env)) assert.deepEqual(m.windows, EXPECTED);
@@ -180,7 +180,7 @@ test('T10 repeated limits events: delivered each time, identical values are fine
 	assert.equal(limits(env2).length, 0);
 	assert.equal(env2.events('cc:turn_end').length, 0);
 
-	const changed = proto.connectFrame(0, proto.limitsPayload({ windows: [['7d', 1, 1791990000, 0.3], ['5h', 1, 1791749400, 0.8]] }));
+	const changed = proto.connectFrame(0, proto.limitsPayload({ cursor: '9999999999999-0', windows: [['7d', 1, 1791990000, 0.3], ['5h', 1, 1791749400, 0.8]] }));
 	const { env: env3 } = await runStream([frame('limits_5h_first'), changed]);
 	assert.equal(limits(env3).at(-1).windows['5h'].utilization, 0.8);
 	assert.equal(limits(env3).at(-1).windows['7d'].utilization, 0.3);
@@ -208,12 +208,12 @@ test('T10b the same event sent again (stream reopened) is not a new reply, a new
 	assert.equal(env2.events('cc:turn_end').length, 2);
 });
 
-test('T10c only the last 32 event ids are remembered', async () => {
+test('T10c the cursor watermark rejects a replay even after its id left the 32-entry cache', async () => {
 	const frames = [];
 	for (let i = 0; i < 40; i++) frames.push(proto.connectFrame(0, proto.limitsPayload({ windows: [['5h', 1, 1791749400, 0.5]], cursor: `1791800000${String(i).padStart(3, '0')}-0` })));
 	const first = frames[0];
 	const { env } = await runStream([...frames, first]);
-	assert.equal(limits(env).length, 41, 'the first event was forgotten by then, so it counts again');
+	assert.equal(limits(env).length, 40, 'the watermark still rejects the forgotten older event');
 	const { env: env2 } = await runStream([...frames.slice(0, 31), frames[10]]);
 	assert.equal(limits(env2).length, 31, 'one of the last 32 is still known');
 });
@@ -420,4 +420,65 @@ test('T57 Request objects retain POST generation detection and top-level SSE lim
 	assert.equal(env.events('cc:generation_start').length, 1);
 	assert.equal(env.events('cc:stream_started').length, 1);
 	assert.deepEqual(limits(env)[0], payload);
+});
+
+const quotaFrame = (cursor, windows) => proto.connectFrame(0, proto.limitsPayload({ cursor, windows }));
+
+test('F09 stream cursors reject older unique events and compare sequence numbers numerically', async () => {
+	const { env } = await runStream([
+		quotaFrame('2000-10', [['5h', 1, 1791749400, 0.4]]),
+		quotaFrame('2000-9', [['5h', 1, 1791749400, 0.39]]),
+		quotaFrame('2000-11', [['5h', 1, 1791749400, 0.38]])
+	]);
+	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4, 0.38]);
+});
+
+test('F10 stream freshness is independent for session, weekly, and reset windows', async () => {
+	const { env } = await runStream([
+		quotaFrame('2000-10', [['5h', 1, 1791749400, 0.4]]),
+		quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39], ['7d', 1, 1791990000, 0.2]]),
+		quotaFrame('500-1', [['5h', 1, 1791849400, 0.01]])
+	]);
+	assert.deepEqual(Object.keys(limits(env)[1].windows), ['7d']);
+	assert.equal(limits(env)[2].windows['5h'].utilization, 0.01, 'a different reset window has its own watermark');
+});
+
+test('F11 an unknown organisation becoming known retains its stream watermark', async () => {
+	const frames = [quotaFrame('2000-1', [['5h', 1, 1791749400, 0.4]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39]])];
+	const env = createBridgeEnv({ originalFetch: async (url) => String(url).includes('StreamTimeline') ? streamResponse([frames.shift()]) : new Response('{}') });
+	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
+	await env.fetch('https://claude.ai/api/organizations/org-a/usage');
+	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
+	assert.equal(limits(env).length, 1);
+});
+
+test('F12 switching organisations separates cursors and drops frames from the old open stream', async () => {
+	let oldController;
+	let openOld = true;
+	const env = createBridgeEnv({ originalFetch: async (url) => {
+		if (!String(url).includes('StreamTimeline')) return new Response('{}');
+		if (openOld) {
+			openOld = false;
+			return new Response(new ReadableStream({ start(c) { oldController = c; c.enqueue(quotaFrame('2000-1', [['5h', 1, 1791749400, 0.4]])); } }), { headers: { 'content-type': 'application/connect+proto' } });
+		}
+		return streamResponse([quotaFrame('2000-1', [['5h', 1, 1791749400, 0.1]])]);
+	} });
+	await env.fetch('https://claude.ai/api/organizations/org-a/usage');
+	const old = await env.fetch(STREAM_URL, { method: 'POST' }); await settle();
+	await env.fetch('https://claude.ai/api/organizations/org-b/usage');
+	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
+	oldController.enqueue(quotaFrame('3000-1', [['5h', 1, 1791749400, 0.41]])); oldController.close();
+	await readAll(old); await settle();
+	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4, 0.1]);
+	assert.equal(env.messages.filter((m) => m.type === 'cc:message_limit').at(-1).meta.orgId, 'org-b');
+});
+
+test('F13 missing or slightly changed future reset times cannot bypass a newer cursor', async () => {
+	const reset = Math.floor(Date.now() / 1000) + 3600;
+	const { env } = await runStream([
+		quotaFrame('3000-1', [['5h', 1, reset, 0.4]]),
+		quotaFrame('2000-1', [['5h', 1, reset + 1, 0.39]]),
+		proto.connectFrame(0, proto.encodeFields([[1, 'm', [[10, 'm', [[1, 's', '1000-1']]], [11, 'v', 2], [4, 'm', [[13, 'm', [[1, 's', '5h'], [2, 'm', [[3, 'd', 0.38]]]]]]]]]]))
+	]);
+	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4]);
 });

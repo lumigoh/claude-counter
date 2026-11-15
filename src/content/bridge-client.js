@@ -38,15 +38,15 @@
 				}
 
 				// Events
-				this._emit(data.type, data.payload);
+				this._emit(data.type, data.payload, data.meta);
 			});
 		}
 
-		_emit(type, payload) {
+		_emit(type, payload, meta) {
 			const listeners = this._listeners.get(type);
 			if (!listeners) return;
 			for (const fn of listeners) {
-				fn(payload);
+				fn(payload, meta);
 			}
 		}
 

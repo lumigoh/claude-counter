@@ -44,8 +44,8 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 		}
 	};
 
-	async function emit(type, payload) {
-		for (const fn of handlers[type] || []) await fn(payload);
+	async function emit(type, payload, meta) {
+		for (const fn of handlers[type] || []) await fn(payload, meta);
 	}
 
 	class StubUI {

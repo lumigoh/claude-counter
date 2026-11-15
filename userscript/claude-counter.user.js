@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Counter
 // @namespace    https://github.com/she-llac/claude-counter
-// @version      2.1.6
+// @version      2.1.7
 // @description  Shows session and weekly usage bars on claude.ai.
 // @homepageURL  https://github.com/lumigoh/claude-counter
 // @downloadURL  https://raw.githubusercontent.com/lumigoh/claude-counter/main/userscript/claude-counter.user.js
@@ -119,6 +119,19 @@ const chrome = (() => {
 
 	// Capture original fetch before anyone else can wrap it
 	const originalFetch = window.fetch;
+	let activeOrgId = null;
+	let orgEpoch = 0;
+	function rememberOrg(id) {
+		if (!id) return;
+		if (activeOrgId && activeOrgId !== id) orgEpoch++;
+		activeOrgId = id;
+	}
+	function streamScope() {
+		if (!activeOrgId) {
+			try { rememberOrg((document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1]); } catch {}
+		}
+		return { orgId: activeOrgId, epoch: orgEpoch };
+	}
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -150,27 +163,29 @@ const chrome = (() => {
 		// Detect and broadcast active orgId from any Claude API requests
 		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
 		if (orgMatch && orgMatch[1]) {
+			rememberOrg(orgMatch[1]);
 			post('cc:org_detected', { orgId: orgMatch[1] });
 		}
 
+		const scope = streamScope();
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
 		if (contentType.includes('event-stream')) {
-			handleEventStream(response, method === 'POST' && /\/(?:retry_)?completion(?:[/?]|$)/.test(url));
+			handleEventStream(response, method === 'POST' && /\/(?:retry_)?completion(?:[/?]|$)/.test(url), scope);
 			if (method === 'POST') post('cc:stream_started', {});
 		}
 
 		// New interface: Connect stream carrying the same limit data in protobuf frames.
 		if (url && url.includes(RPC_STREAM_TIMELINE)) {
-			handleConnectStream(response);
+			handleConnectStream(response, scope);
 		}
 
 		return response;
 	};
 
-	function post(type, payload) {
-		window.postMessage({ cc: CC_MARKER, type, payload }, '*');
+	function post(type, payload, meta) {
+		window.postMessage({ cc: CC_MARKER, type, payload, ...(meta ? { meta } : {}) }, '*');
 	}
 
 	function postResponse(requestId, ok, payload, error) {
@@ -197,7 +212,7 @@ const chrome = (() => {
 		return '';
 	}
 
-	async function handleEventStream(response, announceTurnEnd = false) {
+	async function handleEventStream(response, announceTurnEnd = false, scope) {
 		try {
 			const cloned = response.clone();
 			const reader = cloned.body?.getReader?.();
@@ -220,7 +235,7 @@ const chrome = (() => {
 						const json = JSON.parse(raw);
 						const limits = json?.message_limit || (json?.type === 'message_limit' ? json : null);
 						if (limits && typeof limits === 'object') {
-							post('cc:message_limit', limits);
+							if (!scope || scope.epoch === orgEpoch) post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
 						}
 					} catch {
 						// ignore
@@ -506,16 +521,46 @@ const chrome = (() => {
 		return null;
 	}
 
-	function isReplayedEvent(bytes) {
+	const windowCursors = new Map();
+	const MAX_WINDOW_CURSORS = 128;
+	function parsedCursor(id) {
+		const match = typeof id === 'string' && id.match(/^(\d+)-(\d+)$/);
+		return match ? [BigInt(match[1]), BigInt(match[2])] : null;
+	}
+	function olderOrEqual(a, b) {
+		return a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
+	}
+	function freshLimits(bytes, limits, scope) {
+		if (scope && scope.epoch !== orgEpoch) return null;
+		const epoch = scope?.epoch ?? orgEpoch;
 		const id = eventIdOf(bytes);
-		if (!id) return false;
-		if (seenEventIds.has(id)) return true;
-		seenEventIds.add(id);
-		if (seenEventIds.size > MAX_SEEN_EVENTS) seenEventIds.delete(seenEventIds.values().next().value);
-		return false;
+		const seenKey = JSON.stringify([epoch, id]);
+		if (id && seenEventIds.has(seenKey)) return null;
+		if (id) {
+			seenEventIds.add(seenKey);
+			if (seenEventIds.size > MAX_SEEN_EVENTS) seenEventIds.delete(seenEventIds.values().next().value);
+		}
+		const cursor = parsedCursor(id);
+		if (!cursor) return limits;
+		const windows = {};
+		for (const [key, value] of Object.entries(limits.windows)) {
+			const windowKey = JSON.stringify([epoch, key]);
+			const previous = windowCursors.get(windowKey);
+			if (previous && olderOrEqual(cursor, previous.cursor)) {
+				// Reset identifiers may be missing or corrected. Only a provably new window
+				// can bypass the previous cursor; changing a future timestamp is not enough.
+				const newWindow = Number.isFinite(previous.resetsAt) && Number.isFinite(value.resets_at) && previous.resetsAt <= Date.now() / 1000 && value.resets_at > previous.resetsAt;
+				if (!newWindow) continue;
+			}
+			windows[key] = value;
+			windowCursors.delete(windowKey);
+			windowCursors.set(windowKey, { cursor, resetsAt: value.resets_at });
+		}
+		while (windowCursors.size > MAX_WINDOW_CURSORS) windowCursors.delete(windowCursors.keys().next().value);
+		return Object.keys(windows).length ? { ...limits, windows } : null;
 	}
 
-	async function processConnectFrame(flags, payload) {
+	async function processConnectFrame(flags, payload, scope) {
 		if (flags & 0x02) return; // end of stream (JSON trailer or error)
 		let bytes = payload;
 		if (flags & 0x01) {
@@ -523,15 +568,15 @@ const chrome = (() => {
 			bytes = await gunzip(payload);
 			if (!bytes) return;
 		}
-		const limits = extractLimits(bytes);
+		const parsed = extractLimits(bytes);
+		const limits = parsed && freshLimits(bytes, parsed, scope);
 		if (limits) {
-			if (isReplayedEvent(bytes)) return;
-			post('cc:message_limit', limits);
+			post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
 			post('cc:turn_end', {});
 		}
 	}
 
-	async function handleConnectStream(response) {
+	async function handleConnectStream(response, scope) {
 		try {
 			const cloned = response.clone();
 			const reader = cloned.body?.getReader?.();
@@ -539,7 +584,7 @@ const chrome = (() => {
 
 			let chain = Promise.resolve();
 			const parser = createConnectParser((flags, payload) => {
-				chain = chain.then(() => processConnectFrame(flags, payload)).catch(() => {});
+				chain = chain.then(() => processConnectFrame(flags, payload, scope)).catch(() => {});
 			});
 
 			while (true) {
@@ -692,15 +737,15 @@ const chrome = (() => {
 				}
 
 				// Events
-				this._emit(data.type, data.payload);
+				this._emit(data.type, data.payload, data.meta);
 			});
 		}
 
-		_emit(type, payload) {
+		_emit(type, payload, meta) {
 			const listeners = this._listeners.get(type);
 			if (!listeners) return;
 			for (const fn of listeners) {
-				fn(payload);
+				fn(payload, meta);
 			}
 		}
 
@@ -1042,7 +1087,6 @@ const chrome = (() => {
 			this.turnRevision = 0;
 			this.messageCount = 0;
 			CC.bridge.on('cc:turn_end', () => this._afterTurn());
-			CC.bridge.on('cc:org_detected', () => { if (this.enabled && !this.hasCount) this.refresh(); });
 			const navigate = () => {
 				this.revision++;
 				this.turnRevision++;
@@ -1051,6 +1095,14 @@ const chrome = (() => {
 				this._render();
 				if (this.enabled) this.refresh();
 			};
+			CC.bridge.on('cc:org_detected', (payload) => {
+				if (!payload?.orgId) return;
+				const switched = this.lastOrgId && payload.orgId !== this.lastOrgId;
+				this.lastOrgId = payload.orgId;
+				if (!this.enabled) return;
+				if (switched) navigate();
+				else if (!this.hasCount) this.refresh();
+			});
 			window.addEventListener('cc:urlchange', navigate);
 			window.addEventListener('popstate', navigate);
 			document.addEventListener('click', (event) => {
@@ -1096,6 +1148,7 @@ const chrome = (() => {
 					const orgId = await this.getOrgId();
 					if (!current()) return null;
 					if (!orgId) throw new Error('Organisation unavailable');
+					this.lastOrgId = orgId;
 					const data = await CC.bridge.requestConversation(orgId, chatId);
 					if (!current()) return null;
 					if (!Array.isArray(data?.chat_messages)) throw new Error('Conversation unavailable');
@@ -1775,13 +1828,6 @@ function start() {
 	if (CC.__started) return;
 	CC.__started = true;
 
-	// Every organisation id this page has resolved or seen in the page's own requests. A saved usage
-	// snapshot is matched against any of them, because the id found at start-up (cookie, list of
-	// organisations) is not always the one the page's requests use.
-	const knownOrgIds = new Set();
-	function rememberOrg(id) {
-		if (typeof id === 'string' && id) knownOrgIds.add(id);
-	}
 	function getOrgIdFromCookie() {
 		try {
 			return document.cookie
@@ -1798,16 +1844,14 @@ function start() {
 
 		const fromCookie = getOrgIdFromCookie();
 		if (fromCookie) {
-			currentOrgId = fromCookie;
-			rememberOrg(currentOrgId);
+			updateOrgIdIfNeeded(fromCookie);
 			return currentOrgId;
 		}
 
 		try {
 			const lsOrg = localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId');
 			if (lsOrg) {
-				currentOrgId = lsOrg;
-				rememberOrg(currentOrgId);
+				updateOrgIdIfNeeded(lsOrg);
 				return currentOrgId;
 			}
 		} catch {}
@@ -1815,9 +1859,9 @@ function start() {
 		try {
 			if (typeof chrome !== 'undefined' && chrome.storage?.local) {
 				const stored = await new Promise((r) => chrome.storage.local.get(['claude_last_org_id'], r));
+				if (currentOrgId) return currentOrgId;
 				if (stored?.claude_last_org_id) {
-					currentOrgId = stored.claude_last_org_id;
-					rememberOrg(currentOrgId);
+					updateOrgIdIfNeeded(stored.claude_last_org_id);
 					return currentOrgId;
 				}
 			}
@@ -1827,12 +1871,12 @@ function start() {
 			const res = await fetch('https://claude.ai/api/organizations', { credentials: 'include' });
 			if (res.ok) {
 				const orgs = await res.json();
+				if (currentOrgId) return currentOrgId;
 				if (Array.isArray(orgs) && orgs.length > 0) {
 					const activeOrg = orgs.find((o) => o?.active) || orgs[0];
 					const id = activeOrg?.id || activeOrg?.uuid;
 					if (id) {
-						currentOrgId = id;
-						rememberOrg(currentOrgId);
+						updateOrgIdIfNeeded(id);
 						if (typeof chrome !== 'undefined' && chrome.storage?.local) {
 							chrome.storage.local.set({ claude_last_org_id: id });
 						}
@@ -1954,6 +1998,11 @@ function start() {
 	}
 
 	let currentOrgId = null;
+	let orgRevision = 0;
+	const windowFreshness = {
+		five_hour: { revision: 0, resetMs: null },
+		seven_day: { revision: 0, resetMs: null }
+	};
 
 	// Usage state: one entry per window. A window is either live ({ utilization, resets_at, ... }),
 	// expired ({ expired: true }: its reset time has passed, nothing was used since) or null (never seen).
@@ -2001,60 +2050,102 @@ function start() {
 			const resetMs = windowResetMs(usageState[key]);
 			if (resetMs !== null && now >= resetMs) {
 				usageState[key] = { expired: true };
+				windowFreshness[key].revision++;
 				changed = true;
 			}
 		}
 		return changed;
 	}
 
-	function applyUsageUpdate(normalized, source) {
-		if (!normalized) return;
+	function applyUsageUpdate(normalized, source, request = null) {
+		if (!normalized) return false;
 		const now = Date.now();
 		const previous = usageState || { five_hour: null, seven_day: null };
+		const accepted = {};
+		for (const key of USAGE_WINDOW_KEYS) {
+			const value = normalized[key];
+			if (!value || (source === 'cache' && previous[key])) continue;
+			const meta = windowFreshness[key];
+			const resetMs = windowResetMs(value);
+			// A retired window cannot replace the new one, even if its response arrives later.
+			if (resetMs !== null && meta.resetMs !== null && Math.floor(resetMs / 1000) < Math.floor(meta.resetMs / 1000) && resetMs <= now) continue;
+			if (request && request.revisions[key] !== meta.revision) {
+				// The response was started before this window received a live update or expired.
+				// A provably new window is still useful once the previous reset time has passed.
+				const newWindow = resetMs !== null && meta.resetMs !== null && now >= meta.resetMs && Math.floor(resetMs / 1000) > Math.floor(meta.resetMs / 1000);
+				if (!newWindow) continue;
+			}
+			accepted[key] = value;
+			// Restored snapshots are a display fallback, not evidence that an in-flight poll is stale.
+			if (source !== 'cache') meta.revision++;
+			if (resetMs !== null) meta.resetMs = resetMs;
+		}
+		if (!Object.keys(accepted).length) return false;
+		usageState = { ...previous, ...accepted };
 		lastUsageUpdateMs = now;
-		// A window missing from an update keeps what we know: the free plan's /usage reports nothing
-		// even while a window is live, and a limits event may carry only one window.
-		usageState = {
-			five_hour: normalized.five_hour || previous.five_hour,
-			seven_day: normalized.seven_day || previous.seven_day
-		};
 		expireWindows(now);
 		if (source === 'cache') {
-			// A saved window that ended while the page was closed is stale: ask for fresh data right away.
 			if (USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
 		} else {
 			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
 		if (source !== 'cache') persistUsage();
 		ui.setUsage(usageState);
+		return true;
 	}
 
 	function updateOrgIdIfNeeded(newOrgId) {
-		if (newOrgId && typeof newOrgId === 'string') {
-			rememberOrg(newOrgId);
-			if (newOrgId !== currentOrgId) currentOrgId = newOrgId;
+		if (!newOrgId || typeof newOrgId !== 'string' || newOrgId === currentOrgId) return;
+		const switching = !!currentOrgId;
+		currentOrgId = newOrgId;
+		orgRevision++;
+		for (const meta of Object.values(windowFreshness)) {
+			meta.revision++;
+			meta.resetMs = null;
+		}
+		if (switching) {
+			// Quotas belong to an organisation, even when two IDs appeared in the same tab.
+			usageState = null;
+			lastUsageUpdateMs = 0;
+			lastUsageFetchMs = 0;
+			usageEndpointHasData = false;
+			usageEndpointEmpty = false;
+			usageFailures = 0;
+			lastRestore = { org: null, at: 0 };
+			nextUsageAttemptMs = Date.now();
+			ui.setUsage(null);
 		}
 	}
 
-	// Persist the last usage snapshot so the bars survive reloads (the /usage endpoint returns
-	// nothing on the free plan until the next reply brings the limits).
+	const usageStorageKey = (orgId) => `claude_usage_state:${orgId}`;
+
 	async function persistUsage() {
 		try {
 			if (typeof chrome === 'undefined' || !chrome.storage?.local || !usageState) return;
+			const revision = orgRevision;
+			const snapshot = usageState;
 			const orgId = await getOrgId();
-			if (!orgId) return;
-			const orgIds = Array.from(new Set([orgId, ...knownOrgIds])).slice(0, 4);
-			chrome.storage.local.set({ claude_usage_state: { orgId, orgIds, usage: usageState } });
+			if (!orgId || revision !== orgRevision || orgId !== currentOrgId) return;
+			chrome.storage.local.set({ [usageStorageKey(orgId)]: { version: 2, orgId, usage: snapshot } });
 		} catch {
 			// ignore
 		}
 	}
 
-	function readStoredUsage() {
+	function readStoredUsage(orgId) {
 		return new Promise((resolve) => {
 			try {
 				if (typeof chrome === 'undefined' || !chrome.storage?.local) return resolve(null);
-				chrome.storage.local.get(['claude_usage_state'], (result) => resolve(result?.claude_usage_state || null));
+				const key = usageStorageKey(orgId);
+				chrome.storage.local.get([key, 'claude_usage_state'], (result) => {
+					const scoped = result?.[key];
+					if (scoped?.version === 2 && scoped.orgId === orgId) return resolve(scoped);
+					// Only migrate a legacy snapshot with one unambiguous owner. Old aliases may
+					// already contain mixed windows, even when their primary orgId matches.
+					const legacy = result?.claude_usage_state;
+					const unambiguous = !Array.isArray(legacy?.orgIds) || legacy.orgIds.every((id) => id === orgId);
+					resolve(legacy?.orgId === orgId && unambiguous ? legacy : null);
+				});
 			} catch {
 				resolve(null);
 			}
@@ -2064,10 +2155,7 @@ function start() {
 	const usageMissing = () => !usageState || USAGE_WINDOW_KEYS.some((key) => !usageState[key]);
 	let lastRestore = { org: null, at: 0 };
 
-	// The saved snapshot belongs to one account. The organisation is resolved the same way as for
-	// every request (not from the cookie alone: it may be unreadable); the snapshot matches when it
-	// was saved under this id or under any id seen on the page together with it. Windows the page
-	// already knows (from a limits event) are kept; only missing ones are filled in from the snapshot.
+	// Restore only this organisation's missing windows, preserving any newer live readings.
 	async function restoreUsageIfNeeded() {
 		if (!usageMissing()) return true;
 		const orgId = await getOrgId();
@@ -2076,17 +2164,18 @@ function start() {
 		if (lastRestore.org === orgId && now - lastRestore.at < 5000) return false;
 		lastRestore = { org: orgId, at: now };
 
-		const entry = await readStoredUsage();
+		const revision = orgRevision;
+		const entry = await readStoredUsage(orgId);
+		if (revision !== orgRevision || orgId !== currentOrgId) return false;
 		const cached = entry?.usage;
-		const aliases = Array.isArray(entry?.orgIds) ? entry.orgIds : [];
-		const matches = !!entry && (entry.orgId === orgId || aliases.includes(orgId) || [...knownOrgIds].some((id) => id === entry.orgId || aliases.includes(id)));
-		if (!cached || !matches) return false;
+		if (!cached) return false;
 		const fill = {};
 		for (const key of USAGE_WINDOW_KEYS) {
 			if ((!usageState || !usageState[key]) && cached[key]) fill[key] = cached[key];
 		}
 		if (!fill.five_hour && !fill.seven_day) return false;
 		applyUsageUpdate({ five_hour: fill.five_hour || null, seven_day: fill.seven_day || null }, 'cache');
+		persistUsage(); // Migrate a safe legacy snapshot into organisation-scoped storage.
 		return true;
 	}
 
@@ -2101,6 +2190,7 @@ function start() {
 
 		if (usageFetchInFlight) return;
 		usageFetchInFlight = true;
+		const request = { orgId, orgRevision, revisions: Object.fromEntries(USAGE_WINDOW_KEYS.map((key) => [key, windowFreshness[key].revision])) };
 		let raw = null;
 		try {
 			raw = await CC.bridge.requestUsage(orgId);
@@ -2118,6 +2208,11 @@ function start() {
 			usageFetchInFlight = false;
 		}
 
+		if (request.orgRevision !== orgRevision || request.orgId !== currentOrgId) {
+			nextUsageAttemptMs = Math.min(nextUsageAttemptMs, Date.now());
+			return;
+		}
+
 		if (!raw || typeof raw !== 'object') {
 			usageFailures += 1;
 			nextUsageAttemptMs = Date.now() + Math.min(USAGE_RETRY_MS * 2 ** (usageFailures - 1), USAGE_POLL_MS);
@@ -2132,7 +2227,12 @@ function start() {
 		usageEndpointEmpty = !parsed;
 		usageEndpointHasData = !!parsed;
 		if (!parsed) return;
-		applyUsageUpdate(parsed, 'usage');
+		nextUsageAttemptMs = Date.now() + ACTIVE_USAGE_POLL_MS;
+		const applied = applyUsageUpdate(parsed, 'usage', request);
+		if (!applied && USAGE_WINDOW_KEYS.some((key) => usageState?.[key]?.expired)) {
+			// A stale poll must not postpone rollover recovery for an hour.
+			nextUsageAttemptMs = Date.now() + USAGE_RETRY_MS;
+		}
 	}
 
 	// Extra refreshes share the failure/empty-answer cooldown with the periodic poll.
@@ -2151,7 +2251,8 @@ function start() {
 	});
 	window.addEventListener('focus', () => refreshUsageIfStale(60 * 1000));
 
-	function handleMessageLimit(messageLimit) {
+	function handleMessageLimit(messageLimit, meta) {
+		if (meta?.orgId && currentOrgId && meta.orgId !== currentOrgId) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
 	}

@@ -2,6 +2,15 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.7] - 2026-11-15
+
+### Fixed
+- Late `/usage` polls can no longer overwrite windows updated after the poll began. Session and weekly freshness are tracked separately, including the direct-fetch fallback and same-millisecond races.
+- Connect streams reject older unseen cursors and replays beyond the short duplicate cache. Cursor comparisons are numerical and scoped to an organisation epoch and quota window; real new windows and newer server corrections remain valid.
+- Organisation changes invalidate pending polls, token counts and old stream scopes, and immediately clear the previous quota readings. Each organisation has its own storage key; ambiguous legacy alias snapshots are ignored, while single-owner legacy snapshots migrate safely. Delayed organisation discovery cannot overwrite a newer live selection.
+- Saved snapshots remain a lower-priority display fallback, and expired windows retry promptly when an old poll arrives at rollover.
+- Rebuilt the userscript. Validation: 122 automated tests pass; simulated Chromium checks verify a real pending-poll/live-stream race, a fresh downward correction, old/new stream cursor handling, and organisation-isolated persistence/restoration.
+
 ## [2.1.6] - 2026-11-15
 
 ### Added
