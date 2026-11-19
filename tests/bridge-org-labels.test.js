@@ -85,6 +85,10 @@ test('S05 unlabelled streams keep separate cursors: a late frame of one cannot h
 	assert.deepEqual(limitMessages(env).map((m) => m.payload.windows['5h'].utilization), [0.4, 0.1]);
 	streams[0].push(quotaFrame('2500-1', 0.39)); await settle();
 	assert.equal(limitMessages(env).length, 2, 'within one stream the watermark still holds');
+	// The same event id in two unlabelled streams is not a replay across them (#17).
+	streams[0].push(quotaFrame('4000-7', 0.41)); await settle();
+	streams[1].push(quotaFrame('4000-7', 0.11)); await settle();
+	assert.deepEqual(limitMessages(env).slice(-2).map((m) => m.payload.windows['5h'].utilization), [0.41, 0.11]);
 });
 
 test('S06 turn ends carry their stream label, on Connect and legacy streams (B5)', async () => {
@@ -100,4 +104,22 @@ test('S06 turn ends carry their stream label, on Connect and legacy streams (B5)
 	await readAll(await legacy.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' }));
 	await settle();
 	assert.deepEqual(legacy.messages.filter((m) => m.type === 'cc:turn_end').map((m) => m.meta), [{ orgId: B, openedAt: opened }]);
+});
+
+test('S07 unlabelled stream churn cannot evict a labelled org\'s cursors (B4, #16)', async () => {
+	const { env, streams } = streamingEnv(`lastActiveOrg=${ORG}`);
+	const both = (cursor, pct) => proto.connectFrame(0, proto.limitsPayload({ cursor, windows: [['5h', 1, 1791749400, pct], ['7d', 1, 1791990000, pct]] }));
+	await env.fetch(STREAM_URL, { method: 'POST' });
+	streams[0].push(both('3000-1', 0.4)); await settle();
+	env.document.cookie = ''; // 65 tabs or reconnects without a readable cookie
+	for (let i = 0; i < 65; i++) {
+		await env.fetch(STREAM_URL, { method: 'POST' });
+		streams.at(-1).push(both(`${5000 + i}-1`, 0.2));
+	}
+	await settle(60);
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.fetch(STREAM_URL, { method: 'POST' });
+	const before = limitMessages(env).length;
+	streams.at(-1).push(both('2000-1', 0.39)); await settle();
+	assert.equal(limitMessages(env).length, before, 'the older labelled frame is still rejected');
 });

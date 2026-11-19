@@ -517,8 +517,11 @@ const chrome = (() => {
 	// (field 10, "<milliseconds>-<n>"); a limits event whose id was seen before is that replay, not a
 	// new reply. Comparing the limits themselves would not do: two replies in a row can leave them
 	// unchanged (they are rounded to whole percent).
-	const MAX_SEEN_EVENTS = 32;
-	const seenEventIds = new Set();
+	// Replay state lives in two bounded stores (#16): labelled streams (per org) and unlabelled
+	// streams (per stream). Churn from many unlabelled streams evicts only unlabelled entries, so it can
+	// never push out a labelled org's cursors and let an older labelled frame through.
+	const labelledStore = { seen: new Set(), maxSeen: 32, cursors: new Map(), maxCursors: 128 };
+	const unlabelledStore = { seen: new Set(), maxSeen: 32, cursors: new Map(), maxCursors: 64 };
 
 	function eventIdOf(payload) {
 		try {
@@ -534,8 +537,6 @@ const chrome = (() => {
 		return null;
 	}
 
-	const windowCursors = new Map();
-	const MAX_WINDOW_CURSORS = 128;
 	function parsedCursor(id) {
 		const match = typeof id === 'string' && id.match(/^(\d+)-(\d+)$/);
 		return match ? [BigInt(match[1]), BigInt(match[2])] : null;
@@ -547,19 +548,20 @@ const chrome = (() => {
 	// organisations never share cursors, and a stream opened under A stays valid after the user
 	// visits B and comes back (the old global epoch counter silenced it for good).
 	function freshLimits(id, limits, scope) {
+		const store = scope.orgId ? labelledStore : unlabelledStore;
 		const orgKey = scope.orgId || `stream:${scope.id}`;
 		const seenKey = JSON.stringify([orgKey, id]);
-		if (id && seenEventIds.has(seenKey)) return null;
+		if (id && store.seen.has(seenKey)) return null;
 		if (id) {
-			seenEventIds.add(seenKey);
-			if (seenEventIds.size > MAX_SEEN_EVENTS) seenEventIds.delete(seenEventIds.values().next().value);
+			store.seen.add(seenKey);
+			if (store.seen.size > store.maxSeen) store.seen.delete(store.seen.values().next().value);
 		}
 		const cursor = parsedCursor(id);
 		if (!cursor) return limits;
 		const windows = {};
 		for (const [key, value] of Object.entries(limits.windows)) {
 			const windowKey = JSON.stringify([orgKey, key]);
-			const previous = windowCursors.get(windowKey);
+			const previous = store.cursors.get(windowKey);
 			if (previous && olderOrEqual(cursor, previous.cursor)) {
 				// Reset identifiers may be missing or corrected. Only a provably new window
 				// can bypass the previous cursor; changing a future timestamp is not enough.
@@ -567,10 +569,10 @@ const chrome = (() => {
 				if (!newWindow) continue;
 			}
 			windows[key] = value;
-			windowCursors.delete(windowKey);
-			windowCursors.set(windowKey, { cursor, resetsAt: value.resets_at });
+			store.cursors.delete(windowKey);
+			store.cursors.set(windowKey, { cursor, resetsAt: value.resets_at });
 		}
-		while (windowCursors.size > MAX_WINDOW_CURSORS) windowCursors.delete(windowCursors.keys().next().value);
+		while (store.cursors.size > store.maxCursors) store.cursors.delete(store.cursors.keys().next().value);
 		return Object.keys(windows).length ? { ...limits, windows } : null;
 	}
 
