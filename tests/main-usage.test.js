@@ -556,6 +556,9 @@ test('F05 stale events for a retired window cannot erase a live new window', asy
 	assert.equal(env.lastUsage().five_hour.utilization, 2);
 });
 
+// F06 and O04 cover per-window freshness across a switch: their old poll answers the same window,
+// so per-window revisions reject it even without the org guard in refreshUsage. O22 is the test that
+// fails when that org guard is removed (#17).
 test('F06 old organisation polls and labelled stream events are ignored after switching', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }), ORG_STREAM);

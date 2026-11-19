@@ -60,8 +60,10 @@ test('S02 A -> B -> A: the stream opened under A keeps its A label and keeps del
 
 test('S03 every stream message carries the time its stream was opened', async () => {
 	const opened = 1791743968000;
-	const { env, streams } = streamingEnv('', opened); // pinned clock: the exact open time is known
+	const clock = { now: opened };
+	const { env, streams } = streamingEnv('', clock);
 	await env.fetch(STREAM_URL, { method: 'POST' });
+	clock.now = opened + 5000; // delivered later than the stream opened (#17)
 	streams[0].push(quotaFrame('2000-1', 0.4)); await settle();
 	const [message] = limitMessages(env);
 	assert.equal(message.meta.orgId, null, 'no cookie: the stream is honestly unlabelled');
@@ -93,15 +95,20 @@ test('S05 unlabelled streams keep separate cursors: a late frame of one cannot h
 
 test('S06 turn ends carry their stream label, on Connect and legacy streams (B5)', async () => {
 	const opened = 1791743968000;
-	const { env, streams } = streamingEnv(`lastActiveOrg=${ORG}`, opened);
+	const clock = { now: opened };
+	const { env, streams } = streamingEnv(`lastActiveOrg=${ORG}`, clock);
 	await env.fetch(STREAM_URL, { method: 'POST' });
+	clock.now = opened + 5000; // delivered later than the stream opened (#17)
 	streams[0].push(proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened + 1000}-0`, windows: [['5h', 1, 1791749400, 0.4]] }))); await settle();
 	const ends = env.messages.filter((m) => m.type === 'cc:turn_end');
 	assert.deepEqual(ends.map((m) => m.meta), [{ orgId: ORG, openedAt: opened }]);
 
 	const sse = `data: ${JSON.stringify({ type: 'message_limit', windows: { '5h': { utilization: 0.3, resets_at: 1791749400 } } })}\n\n`;
-	const legacy = createBridgeEnv({ cookie: `lastActiveOrg=${ORG}`, nowMs: opened, originalFetch: async () => streamResponse([Buffer.from(sse)], { contentType: 'text/event-stream' }) });
-	await readAll(await legacy.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' }));
+	const legacyClock = { now: opened };
+	const legacy = createBridgeEnv({ cookie: `lastActiveOrg=${ORG}`, nowMs: legacyClock, originalFetch: async () => streamResponse([Buffer.from(sse)], { contentType: 'text/event-stream', delayMs: 10 }) });
+	const response = await legacy.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' });
+	legacyClock.now = opened + 5000; // the body arrives after the request opened
+	await readAll(response);
 	await settle();
 	assert.deepEqual(legacy.messages.filter((m) => m.type === 'cc:turn_end').map((m) => m.meta), [{ orgId: B, openedAt: opened }]);
 });

@@ -74,6 +74,7 @@ test('O03 a genuine switch clears the screen, keeps snapshots, restores and poll
 	assert.equal(env.stored('claude_last_org_id'), B, 'the accepted org is remembered');
 });
 
+// Covers per-window freshness across a switch; O22 covers the org guard in refreshUsage (#17).
 test('O04 after a genuine switch, the old org poll and old streams cannot reach the new org', async () => {
 	const env = await createMainEnv({ storage: scoped(B, 7), cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
 	let complete;
