@@ -80,15 +80,6 @@
 	display: none;
 }
 
-/* Narrow layouts: drop the reset countdown (still in the tooltip / title) */
-.cc-compact .cc-usageReset {
-	display: none;
-}
-
-.cc-compact {
-	gap: 12px;
-}
-
 /* Bars (mini + usage) */
 .cc-bar {
 	--cc-radius: 3px;
