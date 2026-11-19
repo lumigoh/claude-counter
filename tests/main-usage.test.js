@@ -673,7 +673,12 @@ test('M29 a different chat, a branch switch and a finished reply still recount',
 	await env.navigate(`/chat/${OTHER_CHAT}`);
 	assert.equal(env.calls.conversationRequests.length, ++count, 'chat change');
 	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 9);
-	env.document.dispatchEvent({ type: 'click', target: { closest: () => ({}) } });
+	// A click elsewhere is not a branch switch (#13: the old fake matched any selector).
+	const BRANCH = 'button[aria-label="Previous"], button[aria-label="Next"]';
+	env.document.dispatchEvent({ type: 'click', target: { closest: () => null } });
+	await env.clock.advance(600);
+	assert.equal(env.calls.conversationRequests.length, count, 'an unrelated click');
+	env.document.dispatchEvent({ type: 'click', target: { closest: (selector) => (selector === BRANCH ? {} : null) } });
 	await env.clock.advance(600);
 	assert.equal(env.calls.conversationRequests.length, ++count, 'branch switch');
 	await env.emit('cc:turn_end', {});

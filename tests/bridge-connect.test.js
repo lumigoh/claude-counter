@@ -512,3 +512,18 @@ test('T16 a limits event older than its stream is a replay: limits are delivered
 	const { env: env3 } = await runStream([skewed], { nowMs: opened });
 	assert.equal(env3.events('cc:turn_end').length, 1, 'small clock differences are tolerated');
 });
+
+test('T16b the replay cut-off is exactly 120 s before the stream opened (#13)', async () => {
+	// Documented edges: a reload within 120 s of a reply counts it as live; a client clock more than
+	// 120 s ahead of the server's suppresses live turns early in a stream.
+	const opened = 1791744121000;
+	const endsFor = async (ageMs) => {
+		const f = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened - ageMs}-0`, windows: [['5h', 1, 1791749400, 0.5]] }));
+		const { env } = await runStream([f], { nowMs: opened });
+		assert.equal(limits(env).length, 1, `${ageMs} ms: limits always delivered`);
+		return env.events('cc:turn_end').length;
+	};
+	assert.equal(await endsFor(119999), 1, '119 999 ms old: live');
+	assert.equal(await endsFor(120000), 1, '120 000 ms old: still live');
+	assert.equal(await endsFor(120001), 0, '120 001 ms old: replay');
+});
