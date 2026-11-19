@@ -12,7 +12,7 @@ const { createFakeChrome } = require('./fake-chrome');
 const SRC = path.join(__dirname, '../../src');
 const START = Date.UTC(2026, 9, 14, 12, 0, 0);
 
-function createUiEnv({ startMs = START, lang } = {}) {
+function createUiEnv({ startMs = START, lang, pathname = '/new' } = {}) {
 	const dom = createFakeDom();
 	// ui.js picks its language from <html lang> when it loads.
 	if (lang) dom.document.documentElement.lang = lang;
@@ -21,6 +21,7 @@ function createUiEnv({ startMs = START, lang } = {}) {
 	const refreshes = [];
 
 	const window = {
+		location: { pathname },
 		innerWidth: 1280,
 		innerHeight: 800,
 		addEventListener() {},
