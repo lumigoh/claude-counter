@@ -20,11 +20,12 @@ function createUiEnv({ startMs = START, lang, pathname = '/new' } = {}) {
 	const fake = createFakeChrome();
 	const refreshes = [];
 
+	const windowListeners = {};
 	const window = {
 		location: { pathname },
 		innerWidth: 1280,
 		innerHeight: 800,
-		addEventListener() {},
+		addEventListener(type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); },
 		getComputedStyle: () => ({ display: 'block', flexDirection: 'row' })
 	};
 
@@ -66,7 +67,9 @@ function createUiEnv({ startMs = START, lang, pathname = '/new' } = {}) {
 	});
 	ui.initialize();
 
-	return { ui, CC, dom, clock, document: dom.document, refreshes, storageData: fake.data };
+	/** Dispatch a window-level event (Escape, scroll, ...) to what ui.js registered. */
+	const fireWindow = (type, event = {}) => { for (const fn of windowListeners[type] || []) fn({ type, ...event }); };
+	return { ui, CC, dom, clock, document: dom.document, refreshes, storageData: fake.data, chrome: fake.chrome, fireWindow };
 }
 
 function iso(ms) {
