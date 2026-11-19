@@ -23,7 +23,7 @@ Audit fixes, tracked in #1. Each item lists its issue.
 - **Userscript tokenizer (#6).** It now creates its global on pages that define an AMD loader or CommonJS-looking globals.
 
 ### Changed
-- **Page observation (#3).** A burst of page mutations now costs one composer scan after 150 ms instead of one scan per mutation. The tick scans once instead of twice.
+- **Page observation (#3).** Page mutations now cost one composer scan per 150 ms while they continue, instead of one scan per mutation. The tick scans once instead of twice.
 - **Per-org readings (#6).** Recent session readings are stored per organisation (`claude_session_history:<org>`). The old shared key is ignored.
 - **No duplicate broadcast (#6).** Conversations fetched for the optional count are no longer broadcast a second time (`cc:conversation`).
 - **Keyboard and screen readers (#6).**
@@ -33,8 +33,37 @@ Audit fixes, tracked in #1. Each item lists its issue.
 - **Tidying (#8).** Removed unused selectors, colours, styles and strings.
 - **Docs.** Added [docs/architecture.md](docs/architecture.md).
 
+### Post-audit fixes
+After a primary audit and an independent review of this release (#10–#13), cross-checked with reproductions and mutation tests:
+- **Organisation resolution (#10).**
+  - Every start-up source is validated before it can decide. An invalid remembered org (2.1.7 stored route words) no longer blocks start-up without a cookie, and is overwritten.
+  - Start-up order is cookie, page storage, org list `active`, remembered org, only org, first candidate. Page storage keys are checked separately.
+  - Concurrent start-ups share one org list request, and a start-up from a candidate polls at once.
+  - A no-cookie re-check discards a stale answer, and a candidate seen during the cooldown schedules one re-check when it ends.
+  - An event labelled with the newly chosen org is kept during the 1-second tick lag.
+- **Unlabelled streams (#11).**
+  - Limits from a stream without an org label (cookie unreadable) are never applied or saved; they prompt an org-scoped poll. Previously another org's quota could be stored under the active one. Cost: without the cookie, bars update by poll after each reply, and the free plan gets no live values.
+  - Unlabelled streams keep separate replay state.
+  - Turn ends carry their stream's label; the token counter ignores other orgs' turn ends.
+- **UI (#12).**
+  - Tooltips open on keyboard focus only, so a touch tap no longer pins them open.
+  - A stale session-history read can't overwrite newer readings.
+  - Enter/Space ignore key repeat and modifier keys.
+  - Nested `/…/chat/<id>` routes get the fade again, as in 2.1.7.
+- **Tests (#13).**
+  - Replay cut-off boundary tests added.
+  - Vacuous or mutant-surviving tests hardened: F11, F17, O02, O07, O08, M29, S03, U58, U61, U62, I01.
+  - New end-to-end bridge-to-brain test and a guard-mutant test (O22).
+- **Wording.** "One scan per 150 ms while mutations continue" describes the observer change more precisely than "one scan after 150 ms".
+- **Left as is and documented:**
+  - The digit rule fails closed for digitless IDs.
+  - An extra scan when our own row moves.
+  - A switch poll skipped by the in-flight flag recovers on the next tick.
+  - Both replay-heuristic edges.
+
 ### Validation
-- 151 automated tests pass. New tests cover:
+- 170 automated tests pass (151 before the post-audit fixes).
+- Earlier 2.1.8 validation: 151 automated tests passed. New tests cover:
   - incidental organisation requests, genuine switches, A→B→A, and stale polls and streams
   - observer coalescing
   - token refresh rules and replay detection
@@ -42,13 +71,13 @@ Audit fixes, tracked in #1. Each item lists its issue.
   - per-org history, keyboard/ARIA and Spanish
   - the AMD tokenizer
   - fade routes
-- 28 browser checks pass in Chromium, for both the unpacked extension and the userscript, against a simulated claude.ai page:
+- 28 browser checks pass in Chromium (re-run after the post-audit fixes), for both the unpacked extension and the userscript, against a simulated claude.ai page:
   - placement and late composer
   - an incidental request for another org, and a cookie switch
   - keyboard refresh and tooltips
   - the fade on `/chat`, `/code` and `/new`
   - token counter off and on
-- Not verified: the real signed-in claude.ai, Firefox, and real-world performance. Open questions are listed in #1.
+- Owner check of the pre-audit userscript in Firefox on real claude.ai: chat bars, the Claude Code fade and keyboard access via Shift+Tab (#9). Not verified: organisation switching on the real site, the extension in Firefox, and real-world performance. Open questions are listed in #1.
 
 ## [2.1.7] - 2026-11-15
 
