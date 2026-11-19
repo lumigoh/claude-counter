@@ -42,12 +42,16 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 5. the account's only org,
 6. the first candidate seen.
 
-Concurrent callers share one start-up resolution, so at most one org list request. A start-up from a candidate restores that org's snapshot and polls at once.
+**Start-up never blocks on the network.**
+- The org list and the remembered org are read at the same time, and the list gets 2 seconds.
+- If the list is slower, the remembered org (or else the first candidate) is used. A late answer that marks another org `active` then corrects it as a genuine switch, unless a trusted source spoke or the org changed in the meantime.
+- A cookie that appears at any point wins, because trusted sources are read again after every wait.
+- Concurrent callers share one start-up resolution, so there is at most one org list request.
 
 **Candidates** are IDs seen in requests (`cc:org_detected`). claude.ai also requests other organisations (for example team plus personal accounts), so a candidate never switches the active org on its own.
 
 **No-cookie re-check.** Without a cookie, a differing candidate triggers a re-check of the org list, at most every 5 minutes:
-- A candidate that arrives during the cooldown schedules one re-check when it ends.
+- A candidate that arrives during the cooldown, or while a re-check is in flight, schedules one more re-check (when the cooldown ends).
 - The list's answer is discarded if a trusted source spoke or the org changed while waiting.
 - If nothing trusted names another org, the current one stays.
 
@@ -57,22 +61,42 @@ Concurrent callers share one start-up resolution, so at most one org list reques
 - in-flight polls are invalidated through revisions,
 - the new org's snapshot is restored and polled immediately.
 
+**Snapshots and the start-up poll.** A restored snapshot is shown at once but doesn't count as fresh data, because its age is unknown.
+- Every first acceptance of an org restores its snapshot and then polls once. That poll shares the freshness gate with the page's own start-up poll, so there is one poll per page load.
+- Callers share the restore in flight for the same org, so a poll never lands before the snapshot is shown.
+- An expired snapshot asks for fresh data at once only if no poll has answered yet. Failure and free-plan backoff stay in force.
+
 ## Accepting usage numbers
 
 - **Streams are labelled, not judged, by the listener.** Legacy completion streams take the org from their URL. Connect streams take the cookie at open time. Replay and ordering protection (event-ID cursors) is kept per org label.
 - **The brain judges.**
   - An event labelled with the active org is applied.
   - An event labelled with another org is dropped, after a synchronous cookie re-check so the new org's events within the 1-second tick lag are kept.
-- **No-cookie policy.** An unlabelled event (cookie unreadable) is never applied or saved, because its owner is unknown. It only prompts an org-scoped `/usage` poll.
-  - Without the cookie, the bars update by poll after each reply instead of live.
-  - On the free plan, where `/usage` is empty, there are no live values at all.
-- **Unlabelled streams are kept apart.** Each one has its own replay and cursor state (`stream:<n>`), so one stream can't hide another's snapshot. Replay detection across reopened streams therefore needs the label. Without it, at most one extra recount can follow a reopen.
-- **Turn ends.** `cc:turn_end` carries the stream's label. The token counter ignores one labelled with another org, but unlabelled ones still recount: a recount always fetches the active org's current chat.
+- **No-cookie policy.** An unlabelled event (cookie unreadable) is never applied or saved, because its owner is unknown. Instead it asks for a poll that **starts after the reply**:
+  - Replies in a burst share one poll, which runs no sooner than 5 seconds after the last request started.
+  - A request already in flight is followed up when it ends.
+  - Hidden tabs wait until they're visible.
+  - Failure or free-plan backoff drops the request.
+  - Without the cookie, the bars update by poll after each reply instead of live. On the free plan, where `/usage` is empty, there are no live values at all.
+- **Unlabelled streams are kept apart.**
+  - Each one has its own replay and cursor keys (`stream:<n>`), so one stream can't hide another's snapshot.
+  - All unlabelled streams use their own bounded store (32 seen IDs, 64 cursors). Their churn can never evict a labelled org's cursors (labelled store: 32 seen IDs, 128 cursors).
+  - Replay detection across reopened streams therefore needs the label. Without it, at most one extra recount can follow a reopen.
+- **Turn ends.** `cc:turn_end` carries the stream's label.
+  - The token counter ignores one labelled with another org.
+  - Before the first org is accepted, it waits for the org instead of dropping the turn end.
+  - Unlabelled turn ends still recount: a recount always fetches the active org's current chat.
 - **Replay heuristic.** Event IDs start with the server's epoch milliseconds. A limits event more than 120 000 ms older than its stream's open time is a replay: its limits are delivered, but no turn end is sent. Two edges are known and accepted:
   - Reloading within 120 s of a reply treats that reply as live, so one extra recount can happen.
   - A client clock more than *S* > 120 s ahead of the server suppresses turn ends during the first *S* − 120 s of a stream.
 - **Freshness.** Each window (5-hour, 7-day) tracks a revision and its reset time. A poll that started before a newer live reading can't overwrite it. A retired window can't replace a newer one. Saved snapshots are only a display fallback.
 - **Expired windows** show 0% and trigger a fresh poll.
+
+## Recent session readings
+
+The Session tooltip's "Recent readings" are stored per org and reset window (`claude_session_history:<org>`).
+- A window's saved history is loaded once. Readings that arrive while the load is pending are queued and applied on top of the saved history when it lands, then saved once.
+- A load belongs to one org and one window. Switching org, clearing, or a new window invalidates it, so a late read can't leak one org's readings into another's.
 
 ## Keeping the bars in place
 
