@@ -2,6 +2,54 @@
 
 All notable changes to the Claude Counter extension will be documented in this file.
 
+## [2.1.8] - 2026-11-19
+
+Audit fixes, tracked in #1. Each item lists its issue.
+
+### Fixed
+- **Organisation switching (#2).**
+  - An organisation ID seen in a page request is now only a candidate. The active organisation comes from trusted sources: the `lastActiveOrg` cookie, claude.ai's saved setting, or an org list that marks one org active.
+  - Previously, a request touching a second org blanked the bars and refilled them when the first org reappeared.
+  - The 1-second tick notices cookie changes, so genuine switches work without a reload. A switch restores the new org's snapshot and polls it immediately.
+  - `claude_last_org_id` is written only when an org is accepted. Org-list entries are identified by `uuid`.
+- **Live stream silenced (#2).**
+  - Streams are labelled with their organisation and opening time instead of a global epoch counter, which had dropped open streams for good after any org change, including A→B→A.
+  - The content script drops events from other organisations, and unlabelled events opened before a switch.
+- **Composer fade on Claude Code (#7).** The fade above the bars is shown on `/code/<id>` session pages as well as `/chat/<id>`. Pages with no transcript are still excluded.
+- **Optional token counter (#4).**
+  - Same-chat `pushState`/`replaceState`/`popstate` events no longer cancel the count and refetch the conversation.
+  - A replayed limits event, older than its stream, still updates the bars but no longer announces a finished reply.
+- **Identifiers (#5).** Org IDs pass a permissive check (URL-safe, 8–128 characters, at least one digit) before use, and IDs are encoded in request URLs.
+- **Userscript tokenizer (#6).** It now creates its global on pages that define an AMD loader or CommonJS-looking globals.
+
+### Changed
+- **Page observation (#3).** A burst of page mutations now costs one composer scan after 150 ms instead of one scan per mutation. The tick scans once instead of twice.
+- **Per-org readings (#6).** Recent session readings are stored per organisation (`claude_session_history:<org>`). The old shared key is ignored.
+- **No duplicate broadcast (#6).** Conversations fetched for the optional count are no longer broadcast a second time (`cc:conversation`).
+- **Keyboard and screen readers (#6).**
+  - Session and Weekly are keyboard buttons: Tab, then Enter or Space, refreshes.
+  - Tooltips show on focus and are linked with `aria-describedby`, as is the token count's.
+- **Spanish (#6).** Spanish pages get fully translated tooltips and token texts.
+- **Tidying (#8).** Removed unused selectors, colours, styles and strings.
+- **Docs.** Added [docs/architecture.md](docs/architecture.md).
+
+### Validation
+- 151 automated tests pass. New tests cover:
+  - incidental organisation requests, genuine switches, A→B→A, and stale polls and streams
+  - observer coalescing
+  - token refresh rules and replay detection
+  - identifier checks
+  - per-org history, keyboard/ARIA and Spanish
+  - the AMD tokenizer
+  - fade routes
+- 28 browser checks pass in Chromium, for both the unpacked extension and the userscript, against a simulated claude.ai page:
+  - placement and late composer
+  - an incidental request for another org, and a cookie switch
+  - keyboard refresh and tooltips
+  - the fade on `/chat`, `/code` and `/new`
+  - token counter off and on
+- Not verified: the real signed-in claude.ai, Firefox, and real-world performance. Open questions are listed in #1.
+
 ## [2.1.7] - 2026-11-15
 
 ### Fixed
