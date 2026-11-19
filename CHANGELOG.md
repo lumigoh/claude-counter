@@ -82,8 +82,29 @@ After an independent review of the post-audit changes (#14–#17), each fix aime
   - S05 covers repeated event IDs.
   - F06/O04 now state what they cover.
 
+### Final-round fixes
+A second independent review found that several targeted-review fixes added new timing paths. This round removes paths where possible and tests rules rather than single scenarios:
+- **Start-up makes one org-list request (R1).**
+  - Both start-up reads (list, remembered org) share one 2 s limit. A list that names the active org is used without waiting for the remembered one.
+  - With nothing to choose, start-up keeps waiting on that one request until it answers, a candidate arrives, or the cookie names an org.
+- **No late list correction (R2).** Once start-up has chosen, a slower list answer is ignored. Switches come only from the cookie or page setting, or from a candidate re-check. Previously an old answer could override a newer re-check and poll the wrong org.
+- **Snapshots (R3).** A restore never waits for start-up. The accepting org's restore runs once, before its start-up poll.
+- **Start-up poll (R4).** Skipped only when both windows already have live readings, so a reply carrying only the session window no longer leaves the weekly bar blank.
+- **Re-checks (R5).** One "unchecked candidate" flag replaces the candidate comparisons, so a candidate seen during a re-check is never lost.
+- **Backoff (R6).** Restoring an expired snapshot no longer shortens a failure backoff.
+- **Tests.**
+  - U69 is split per invalidation.
+  - U70 counts writes.
+  - S07b covers seen IDs.
+  - S03/S06 move the clock before the response headers.
+- **Known limits, unchanged.**
+  - A backward clock step can drop one reply poll.
+  - A reset time that goes A→B→A while B's history loads can save B's history.
+  - An org switch during start-up can add one extra token recount.
+  - Without a cookie, a multi-org account whose list is slower than 2 s shows the remembered org until a candidate re-check or the cookie corrects it.
+
 ### Validation
-- 183 automated tests pass (170 before the targeted-review fixes, 151 before the post-audit fixes).
+- 196 automated tests pass (183 before the final round, 170 before the targeted-review fixes, 151 before the post-audit fixes).
 - Earlier post-audit validation: 170 automated tests passed.
 - Earlier 2.1.8 validation: 151 automated tests passed. New tests cover:
   - incidental organisation requests, genuine switches, A→B→A, and stale polls and streams

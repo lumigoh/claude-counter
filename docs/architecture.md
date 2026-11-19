@@ -42,16 +42,17 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 5. the account's only org,
 6. the first candidate seen.
 
-**Start-up never blocks on the network.**
-- The org list and the remembered org are read at the same time, and the list gets 2 seconds.
-- If the list is slower, the remembered org (or else the first candidate) is used. A late answer that marks another org `active` then corrects it as a genuine switch, unless a trusted source spoke or the org changed in the meantime.
-- A cookie that appears at any point wins, because trusted sources are read again after every wait.
-- Concurrent callers share one start-up resolution, so there is at most one org list request.
+**Start-up rules.**
+- **One request.** Start-up makes at most one org-list request (R1). Concurrent callers share one start-up resolution.
+- **2 s limit.** The org list and the remembered org are read at the same time and share one 2-second limit. A read that hasn't answered by then counts as missing. A list that marks one org `active` is used at once, without waiting for the remembered org.
+- **Nothing to choose.** With no answer and no fallback, start-up keeps waiting on that same request until it answers, a candidate arrives, or the cookie tick accepts an org. Restores and polls never start their own start-up.
+- **No late correction.** Once start-up has chosen, it is over: a later list answer is ignored (R2). This is a deliberate trade-off. Without a cookie, a multi-org account whose list is slower than 2 s shows the remembered org until a candidate re-check or the cookie corrects it.
+- **Cookie wins.** A cookie that appears at any point wins, because trusted sources are read again after every wait.
 
 **Candidates** are IDs seen in requests (`cc:org_detected`). claude.ai also requests other organisations (for example team plus personal accounts), so a candidate never switches the active org on its own.
 
 **No-cookie re-check.** Without a cookie, a differing candidate triggers a re-check of the org list, at most every 5 minutes:
-- A candidate that arrives during the cooldown, or while a re-check is in flight, schedules one more re-check (when the cooldown ends).
+- One flag records that a differing candidate was seen since the last re-check started reading (R5). It is cleared only when a re-check starts, so a candidate seen during the cooldown or an in-flight re-check always gets one more re-check, when the cooldown ends.
 - The list's answer is discarded if a trusted source spoke or the org changed while waiting.
 - If nothing trusted names another org, the current one stays.
 
@@ -63,8 +64,9 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 
 **Snapshots and the start-up poll.** A restored snapshot is shown at once but doesn't count as fresh data, because its age is unknown.
 - Every first acceptance of an org restores its snapshot and then polls once. That poll shares the freshness gate with the page's own start-up poll, so there is one poll per page load.
-- Callers share the restore in flight for the same org, so a poll never lands before the snapshot is shown.
-- An expired snapshot asks for fresh data at once only if no poll has answered yet. Failure and free-plan backoff stay in force.
+- The poll is skipped only when both windows already hold live readings (R4). A reply carrying only the session window doesn't count.
+- A restore needs a known org and never waits for start-up. Acceptance runs it (R3), and callers share the restore in flight for the same org, so a poll never lands before the snapshot is shown.
+- An expired snapshot asks for fresh data at once only if no poll has answered or failed yet. A restore never shortens a failure or free-plan backoff (R6).
 
 ## Accepting usage numbers
 
@@ -97,6 +99,13 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 The Session tooltip's "Recent readings" are stored per org and reset window (`claude_session_history:<org>`).
 - A window's saved history is loaded once. Readings that arrive while the load is pending are queued and applied on top of the saved history when it lands, then saved once.
 - A load belongs to one org and one window. Switching org, clearing, or a new window invalidates it, so a late read can't leak one org's readings into another's.
+
+## Known limits
+
+These are recorded rather than fixed, because a fix would add more code than the risk justifies:
+- **Clock step.** A backward system-clock step right after a poll can drop one unlabelled reply's poll. The next scheduled poll catches up.
+- **Reset A→B→A.** A session reset time that changes A→B→A while B's history is still loading can save B's history while A is shown.
+- **Extra recount.** A labelled turn end that waits through start-up, followed by a switch before its recount, can cause one extra recount for the new org.
 
 ## Keeping the bars in place
 
