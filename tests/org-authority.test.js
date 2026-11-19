@@ -59,7 +59,7 @@ test('O02 without a cookie, a candidate alone does not switch away from the know
 	await env.clock.advance(3000);
 	assert.equal(env.lastUsage().five_hour.utilization, 40);
 	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === B).length, 0);
-	assert.ok(listRequests <= 1, 'the org list re-check is rate limited');
+	assert.equal(listRequests, 1, 'one re-check of the org list, then rate limited');
 });
 
 test('O03 a genuine switch clears the screen, keeps snapshots, restores and polls the new org at once', async () => {
@@ -110,19 +110,26 @@ test('O06 without a cookie, an org list that marks another org active is a genui
 	assert.equal(env.lastUsage().five_hour.utilization, 7);
 });
 
-test('O07 the remembered org is written only when the active org is accepted, not on every request', async () => {
-	const env = await createMainEnv({ cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+test('O07 the remembered org is written once when the active org is accepted, not on every request', async () => {
 	let writes = 0;
-	const set = env.chrome.storage.local.set;
-	env.chrome.storage.local.set = (items, cb) => { if ('claude_last_org_id' in items) writes++; return set(items, cb); };
+	const env = await createMainEnv({
+		cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage,
+		beforeStart: (e) => {
+			const set = e.chrome.storage.local.set;
+			e.chrome.storage.local.set = (items, cb) => { if ('claude_last_org_id' in items) writes++; return set(items, cb); };
+		}
+	});
+	assert.equal(writes, 1, 'start-up acceptance remembers the org');
+	assert.equal(env.stored('claude_last_org_id'), ORG);
 	for (let i = 0; i < 10; i++) await env.emit('cc:org_detected', { orgId: ORG });
 	await env.clock.flush();
-	assert.equal(writes, 0);
+	assert.equal(writes, 1, 'requests mentioning the org do not rewrite it');
 });
 
 test('O08 an org list entry is identified by its uuid (a numeric id is not an org ID)', async () => {
 	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
-	env.context.fetch = async () => ({ ok: true, json: async () => [{ id: 12345, uuid: ORG, active: true }] });
+	// Two orgs, so the sole-org fallback cannot hide an ignored `active` flag.
+	env.context.fetch = async () => ({ ok: true, json: async () => [{ id: 777, uuid: B }, { id: 12345, uuid: ORG, active: true }] });
 	await env.calls.uiOpts.onUsageRefresh();
 	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
 });

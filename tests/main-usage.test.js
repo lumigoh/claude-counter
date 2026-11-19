@@ -283,6 +283,7 @@ test('M18 windows the page does not know are filled in from the snapshot, known 
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: null }));
 	assert.equal(env.lastUsage().five_hour.utilization, 20);
 	assert.equal(env.lastUsage().seven_day, null);
+	await env.clock.flush(); // let the live reading's own save finish before planting the snapshot
 
 	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, ...snapshot({ orgId: ORG }) } });
 	await env.clock.flush();
@@ -606,14 +607,18 @@ test('F16 a single-owner legacy snapshot migrates into scoped storage without a 
 	assert.equal(env.calls.usageRequests.length, 0);
 });
 
-test('F17 switching back restores only that organisation quota', async () => {
+test('F17 switching back restores only that organisation quota, before its fresh poll answers', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => ({ five_hour: liveWindow(40, START + HOUR) }) });
 	env.answers.usage = async () => ({ five_hour: liveWindow(10, START + HOUR) });
 	await switchOrg(env, OTHER_ORG);
 	assert.equal(env.lastUsage().five_hour.utilization, 10);
-	env.answers.usage = async () => ({ five_hour: liveWindow(40, START + HOUR) });
+	let complete;
+	env.answers.usage = () => new Promise((resolve) => { complete = resolve; });
 	await switchOrg(env, ORG);
-	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	assert.equal(env.lastUsage().five_hour.utilization, 40, 'the snapshot of this organisation shows while its poll is pending');
+	complete({ five_hour: liveWindow(42, START + HOUR) });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 42, 'then the fresh answer replaces it');
 	assert.equal(env.stored(`claude_usage_state:${OTHER_ORG}`).usage.five_hour.utilization, 10);
 });
 
