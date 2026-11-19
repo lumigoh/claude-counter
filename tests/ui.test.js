@@ -255,3 +255,32 @@ test('U55 token counter is hidden initially and appears before the quota groups 
 	env.ui.setTokenCounter({ enabled: false, active: true });
 	assert.equal(env.ui.tokenDisplay.classList.contains('cc-hidden'), true);
 });
+
+test('U58 a burst of page mutations costs one composer scan, after a short pause (#3)', async () => {
+	const env = createUiEnv();
+	env.dom.buildComposer();
+	env.ui.attach();
+	let scans = 0;
+	const find = env.ui._findComposerBox.bind(env.ui);
+	env.ui._findComposerBox = () => { scans++; return find(); };
+	const unrelated = env.document.createElement('p');
+	env.document.body.appendChild(unrelated);
+	for (let i = 0; i < 100; i++) {
+		for (const observer of env.dom.observers) observer.cb([{ type: 'childList', target: unrelated }]);
+	}
+	assert.equal(scans, 0, 'no layout reads inside the observer callback');
+	await env.clock.advance(150);
+	assert.equal(scans, 1, 'one scan for the whole burst');
+});
+
+test('U59 mutations of the extension\'s own nodes schedule nothing (#3)', async () => {
+	const env = createUiEnv();
+	env.dom.buildComposer();
+	env.ui.attach();
+	let scans = 0;
+	const find = env.ui._findComposerBox.bind(env.ui);
+	env.ui._findComposerBox = () => { scans++; return find(); };
+	for (const observer of env.dom.observers) observer.cb([{ type: 'attributes', target: env.ui.sessionBarFill }]);
+	await env.clock.advance(150);
+	assert.equal(scans, 0);
+});
