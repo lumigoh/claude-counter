@@ -1457,10 +1457,15 @@ function start() {
 			fade.style.backgroundImage = `linear-gradient(to bottom, transparent, ${background})`;
 		}
 
+		// Claude rebuilds and hydrates the composer, so the bars must be re-placed when the page
+		// changes. While a reply streams, the page mutates many times per second, and finding the
+		// composer reads layout and computed styles. So the callback itself does no layout work:
+		// it ignores our own nodes and schedules one placement check for the whole burst (#3).
+		// The 1 s tick remains the safety net for anything missed.
 		_observeDom() {
 			this.domObserver = new MutationObserver((records) => {
 				if (records.length && records.every((r) => r.target?.closest?.('.cc-usageRow, .cc-tooltip, .cc-composerFade'))) return;
-				if (this._usageMisplaced()) this._scheduleUsageReattach(150);
+				this._scheduleUsageReattach(150);
 			});
 
 			const startObserving = () => {
@@ -1582,9 +1587,8 @@ function start() {
 			this._attachUsageLine();
 		}
 
-		_attachUsageLine() {
+		_attachUsageLine(box = this._findComposerBox()) {
 			if (!this.usageLine) return;
-			const box = this._findComposerBox();
 			if (!box || !box.parentElement) {
 				this.usageLine.classList.add('cc-unmounted');
 				this._usageAnchor = null;
@@ -1599,17 +1603,24 @@ function start() {
 			this.refreshProgressChrome();
 		}
 
+		/** Coalesces placement checks: the first request starts the timer, later ones join it. */
 		_scheduleUsageReattach(delay = 150) {
 			if (this._usageReattachTimer) return;
 			this._usageReattachTimer = setTimeout(() => {
 				this._usageReattachTimer = null;
-				this.attachUsageLine();
+				this._ensureUsagePlacement();
 			}, delay);
 		}
 
-		_usageMisplaced() {
-			if (!this.usageLine) return false;
+		/** One composer scan: re-place the bars only if they are not where they belong. */
+		_ensureUsagePlacement() {
 			const box = this._findComposerBox();
+			if (this._usageMisplaced(box)) this._attachUsageLine(box);
+		}
+
+		/** `box` is the composer found by the caller; pass it to avoid scanning twice. */
+		_usageMisplaced(box = this._findComposerBox()) {
+			if (!this.usageLine) return false;
 			if (!box) return !this.usageLine.classList.contains('cc-unmounted');
 			return this.usageLine.classList.contains('cc-unmounted') || !document.contains(this.usageLine) || this._usageAnchor !== box || this.usageLine.nextElementSibling !== box;
 		}
@@ -1811,7 +1822,7 @@ function start() {
 		}
 
 		tick() {
-			if (this._usageMisplaced()) this.attachUsageLine();
+			this._ensureUsagePlacement();
 			this._syncComposerFade();
 			// Reset text is separate so compact mode can hide it without parsing labels.
 			for (const key of ['session', 'weekly']) {
