@@ -13,7 +13,11 @@ function clone(value) {
 	return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie = '', usage, conversations = {}, showTokenCounter = false, startMs } = {}) {
+// Options for start-up behaviour (2.1.8 post-audit, #10):
+//   pageStorage  claude.ai's own localStorage entries (lastActiveOrg, currentOrganizationId)
+//   fetch        the page fetch used by main.js (org list, direct /usage fallback) from start-up on
+//   beforeStart  called with the env before main.js loads, e.g. to install storage spies
+async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie = '', usage, conversations = {}, showTokenCounter = false, startMs, pageStorage, fetch, beforeStart } = {}) {
 	const clock = createClock(startMs);
 	const calls = { setUsage: [], setMetrics: [], titles: [], pending: [], uiOpts: null, usageRequests: [], conversationRequests: [], tokenStates: [], tokenizerLoads: [] };
 	const handlers = {};
@@ -84,7 +88,9 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 			MutationObserver: class {
 				observe() {}
 				disconnect() {}
-			}
+			},
+			...(pageStorage ? { localStorage: { getItem: (key) => (key in pageStorage ? pageStorage[key] : null) } } : {}),
+			...(fetch ? { fetch } : {})
 		}
 	});
 	env.document.cookie = cookie;
@@ -102,6 +108,7 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 
 	CC.ensureTokenizer = async () => { calls.tokenizerLoads.push(clock.now); };
 	CC.tokens = { computeConversationMetrics: async (data) => ({ totalTokens: data.fakeTokens ?? data.chat_messages.length * 10, trunkMessageCount: data.chat_messages.length }) };
+	if (beforeStart) beforeStart(env);
 	env.load(['content/main.js']);
 	await clock.flush();
 
