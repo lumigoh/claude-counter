@@ -581,6 +581,11 @@
 				return;
 			}
 
+			// A different window: its readings are not the ones on screen, so hide them until this
+			// window's own history loads (D5). This also ends the fast path for the old window, so a
+			// reset time going R1 -> R2 -> R1 loads R1 again instead of saving into R2's history.
+			this.sessionHistory = [];
+			this.sessionResetKey = null;
 			const load = { key, resetsAt, pending: [currentPct] };
 			this._historyLoad = load;
 			const finish = (storedResetsAt, storedHistory) => {

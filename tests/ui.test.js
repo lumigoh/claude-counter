@@ -516,3 +516,40 @@ test('U70 readings that arrive while the saved history loads are appended to it,
 	assert.deepEqual(env.storageData[key].history, [10, 20, 25]);
 	assert.equal(writes, 1, 'the queue is saved once');
 });
+
+// ---- simplification D5: the tooltip only shows the history of the window on screen ---------------
+
+test('U72 D5: a new reset window hides the previous window readings until its own history loads', async () => {
+	const env = createUiEnv();
+	const r1 = iso(START + HOUR);
+	const r2 = iso(START + 6 * HOUR);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 10, resets_at: r1 } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: r1 } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20%/);
+	const reads = heldHistoryReads(env);
+	env.ui.setUsage({ five_hour: { utilization: 3, resets_at: r2 } }); // new window, read held
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+	reads[0]();
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 5, resets_at: r2 } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 3% → 5%/);
+});
+
+test('U73 D5: a reset time going R1 -> R2 -> R1 while R2 loads never saves R2 history under R1', async () => {
+	const env = createUiEnv();
+	const r1 = iso(START + HOUR);
+	const r2 = iso(START + 6 * HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 10, resets_at: r1 } });
+	await env.clock.flush();
+	const reads = heldHistoryReads(env);
+	env.ui.setUsage({ five_hour: { utilization: 3, resets_at: r2 } }); // R2 read held
+	env.ui.setUsage({ five_hour: { utilization: 12, resets_at: r1 } }); // back to R1
+	while (reads.length) { reads.shift()(); await env.clock.flush(); }
+	assert.equal(env.storageData[key].resets_at, r1, 'the saved history belongs to the window on screen');
+	assert.deepEqual(env.storageData[key].history, [10, 12]);
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 12%/);
+});
