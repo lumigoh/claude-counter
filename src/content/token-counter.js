@@ -40,8 +40,18 @@
 				if (previous) navigate();
 				else if (!this.hasCount) this.refresh();
 			});
-			window.addEventListener('cc:urlchange', navigate);
-			window.addEventListener('popstate', navigate);
+			// claude.ai rewrites history (query strings, state) without leaving the chat. Every such
+			// event used to cancel the count and download the whole conversation again; only a
+			// different chat is a navigation for the counter (#4).
+			this.lastChatId = this._chatId();
+			const onLocation = () => {
+				const chatId = this._chatId();
+				if (chatId === this.lastChatId) return;
+				this.lastChatId = chatId;
+				navigate();
+			};
+			window.addEventListener('cc:urlchange', onLocation);
+			window.addEventListener('popstate', onLocation);
 			document.addEventListener('click', (event) => {
 				if (!this.enabled || !event.target?.closest?.('button[aria-label="Previous"], button[aria-label="Next"]')) return;
 				clearTimeout(this.branchTimer);
