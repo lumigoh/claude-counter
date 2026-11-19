@@ -24,7 +24,13 @@
 			this.revision = 0;
 			this.turnRevision = 0;
 			this.messageCount = 0;
-			CC.bridge.on('cc:turn_end', () => this._afterTurn());
+			// A turn end labelled with another organisation is not this chat's reply (#11). Unlabelled
+			// ones (cookie unreadable) still recount: a recount always fetches the active org's current
+			// chat, so it cannot show wrong numbers.
+			CC.bridge.on('cc:turn_end', (payload, meta) => {
+				if (meta?.orgId && meta.orgId !== this.activeOrgId) return;
+				this._afterTurn();
+			});
 			const navigate = () => {
 				this.revision++;
 				this.turnRevision++;
@@ -35,7 +41,9 @@
 			};
 			// Follow the content script's *active* organisation (issue #2). IDs merely seen in page
 			// requests are not switches; reacting to them used to throw away valid counts.
+			this.activeOrgId = null;
 			onActiveOrgChange?.((orgId, previous) => {
+				this.activeOrgId = orgId;
 				if (!this.enabled) return;
 				if (previous) navigate();
 				else if (!this.hasCount) this.refresh();

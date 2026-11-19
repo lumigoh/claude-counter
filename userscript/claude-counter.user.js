@@ -136,8 +136,12 @@ const chrome = (() => {
 			return null;
 		}
 	}
+	// Each stream also gets its own number, so unlabelled streams never share replay/cursor state
+	// with each other (#11): with no organisation to key on, one stream's late frame must not hide
+	// another stream's lower-cursor snapshot.
+	let streamCount = 0;
 	function streamScope(urlOrgId) {
-		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now() };
+		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now(), id: ++streamCount };
 	}
 	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
 
@@ -251,7 +255,7 @@ const chrome = (() => {
 					}
 				}
 			}
-			if (announceTurnEnd) post('cc:turn_end', {});
+			if (announceTurnEnd) post('cc:turn_end', {}, scopeMeta(scope));
 		} catch {
 			// best-effort; don't break claude.ai
 		}
@@ -543,7 +547,7 @@ const chrome = (() => {
 	// organisations never share cursors, and a stream opened under A stays valid after the user
 	// visits B and comes back (the old global epoch counter silenced it for good).
 	function freshLimits(id, limits, scope) {
-		const orgKey = scope.orgId || '';
+		const orgKey = scope.orgId || `stream:${scope.id}`;
 		const seenKey = JSON.stringify([orgKey, id]);
 		if (id && seenEventIds.has(seenKey)) return null;
 		if (id) {
@@ -588,7 +592,8 @@ const chrome = (() => {
 		// the server may first send the latest limits event again; its id is older than the stream.
 		// Those limits still update the bars, but announcing a turn would make the optional token
 		// counter recount for nothing (#4).
-		if (!isReplayedEvent(id, scope)) post('cc:turn_end', {});
+		// The turn end carries the stream's label too, so the token counter can ignore another org's (#11).
+		if (!isReplayedEvent(id, scope)) post('cc:turn_end', {}, scopeMeta(scope));
 	}
 
 	// Event ids start with the server's epoch milliseconds. Allow for the user's clock being ahead
@@ -1112,7 +1117,13 @@ const chrome = (() => {
 			this.revision = 0;
 			this.turnRevision = 0;
 			this.messageCount = 0;
-			CC.bridge.on('cc:turn_end', () => this._afterTurn());
+			// A turn end labelled with another organisation is not this chat's reply (#11). Unlabelled
+			// ones (cookie unreadable) still recount: a recount always fetches the active org's current
+			// chat, so it cannot show wrong numbers.
+			CC.bridge.on('cc:turn_end', (payload, meta) => {
+				if (meta?.orgId && meta.orgId !== this.activeOrgId) return;
+				this._afterTurn();
+			});
 			const navigate = () => {
 				this.revision++;
 				this.turnRevision++;
@@ -1123,7 +1134,9 @@ const chrome = (() => {
 			};
 			// Follow the content script's *active* organisation (issue #2). IDs merely seen in page
 			// requests are not switches; reacting to them used to throw away valid counts.
+			this.activeOrgId = null;
 			onActiveOrgChange?.((orgId, previous) => {
+				this.activeOrgId = orgId;
 				if (!this.enabled) return;
 				if (previous) navigate();
 				else if (!this.hasCount) this.refresh();
@@ -2259,9 +2272,6 @@ function start() {
 
 	let currentOrgId = null;
 	const orgChangeListeners = new Set();
-	// Time of the last genuine A -> B switch. Unlabelled stream events from streams opened before
-	// it may belong to the previous organisation, so they are dropped (see handleMessageLimit).
-	let lastOrgSwitchMs = -Infinity;
 	let orgRevision = 0;
 	const windowFreshness = {
 		five_hour: { revision: 0, resetMs: null },
@@ -2379,7 +2389,6 @@ function start() {
 		} catch {}
 		ui.setOrg(newOrgId);
 		if (switching) {
-			lastOrgSwitchMs = Date.now();
 			usageState = null;
 			lastUsageUpdateMs = 0;
 			lastUsageFetchMs = 0;
@@ -2538,18 +2547,25 @@ function start() {
 
 	/**
 	 * Limits from a reply. The bridge labels each stream with the organisation it was opened under
-	 * (`meta.orgId`, null when unknown) and when (`meta.openedAt`). Only the content script knows the
-	 * active organisation, so it decides here:
-	 *   - labelled with another org            -> dropped
-	 *   - unlabelled, opened before a switch   -> dropped (could be the previous org)
-	 *   - otherwise                            -> applied (freshness rules still apply)
+	 * (`meta.orgId`, null when the cookie is unreadable) and when (`meta.openedAt`). Only the content
+	 * script knows the active organisation, so it decides here:
+	 *   - labelled with the active org  -> applied (freshness rules still apply)
+	 *   - labelled with another org     -> dropped
+	 *   - unlabelled                    -> never applied or saved: its owner is unknown, and applying
+	 *                                      it once stored another org's quota under the active one
+	 *                                      (#11). It only prompts an org-scoped /usage poll. Cost:
+	 *                                      without the cookie, bars update by poll after each reply,
+	 *                                      and the free plan (empty /usage) gets no live values.
 	 */
 	function handleMessageLimit(messageLimit, meta) {
+		if (!meta?.orgId) {
+			refreshUsageIfStale(5000);
+			return;
+		}
 		// The cookie may already name the stream's org before the tick notices (start-up, or within
 		// the 1 s after a switch, A8): check it synchronously before dropping a labelled event.
 		if (meta?.orgId && meta.orgId !== currentOrgId) checkTrustedOrgChange();
 		if (meta?.orgId && meta.orgId !== currentOrgId) return;
-		if (!meta?.orgId && Number.isFinite(meta?.openedAt) && meta.openedAt < lastOrgSwitchMs) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
 	}

@@ -33,8 +33,12 @@
 			return null;
 		}
 	}
+	// Each stream also gets its own number, so unlabelled streams never share replay/cursor state
+	// with each other (#11): with no organisation to key on, one stream's late frame must not hide
+	// another stream's lower-cursor snapshot.
+	let streamCount = 0;
 	function streamScope(urlOrgId) {
-		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now() };
+		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now(), id: ++streamCount };
 	}
 	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
 
@@ -148,7 +152,7 @@
 					}
 				}
 			}
-			if (announceTurnEnd) post('cc:turn_end', {});
+			if (announceTurnEnd) post('cc:turn_end', {}, scopeMeta(scope));
 		} catch {
 			// best-effort; don't break claude.ai
 		}
@@ -440,7 +444,7 @@
 	// organisations never share cursors, and a stream opened under A stays valid after the user
 	// visits B and comes back (the old global epoch counter silenced it for good).
 	function freshLimits(id, limits, scope) {
-		const orgKey = scope.orgId || '';
+		const orgKey = scope.orgId || `stream:${scope.id}`;
 		const seenKey = JSON.stringify([orgKey, id]);
 		if (id && seenEventIds.has(seenKey)) return null;
 		if (id) {
@@ -485,7 +489,8 @@
 		// the server may first send the latest limits event again; its id is older than the stream.
 		// Those limits still update the bars, but announcing a turn would make the optional token
 		// counter recount for nothing (#4).
-		if (!isReplayedEvent(id, scope)) post('cc:turn_end', {});
+		// The turn end carries the stream's label too, so the token counter can ignore another org's (#11).
+		if (!isReplayedEvent(id, scope)) post('cc:turn_end', {}, scopeMeta(scope));
 	}
 
 	// Event ids start with the server's epoch milliseconds. Allow for the user's clock being ahead
