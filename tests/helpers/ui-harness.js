@@ -12,8 +12,10 @@ const { createFakeChrome } = require('./fake-chrome');
 const SRC = path.join(__dirname, '../../src');
 const START = Date.UTC(2026, 9, 14, 12, 0, 0);
 
-function createUiEnv({ startMs = START } = {}) {
+function createUiEnv({ startMs = START, lang } = {}) {
 	const dom = createFakeDom();
+	// ui.js picks its language from <html lang> when it loads.
+	if (lang) dom.document.documentElement.lang = lang;
 	const clock = createClock(startMs);
 	const fake = createFakeChrome();
 	const refreshes = [];

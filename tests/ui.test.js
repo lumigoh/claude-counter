@@ -284,3 +284,75 @@ test('U59 mutations of the extension\'s own nodes schedule nothing (#3)', async 
 	await env.clock.advance(150);
 	assert.equal(scans, 0);
 });
+
+test('U60 recent session readings are kept per organisation; the old shared key is ignored (#6)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	env.storageData.claude_session_history = { version: 2, resets_at, history: [10, 20] };
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at } });
+	await env.clock.flush();
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 40% → 45%/, 'the shared legacy history is not mixed in');
+	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [40, 45]);
+	env.ui.setOrg('org-b-0002');
+	env.ui.setUsage({ five_hour: { utilization: 50, resets_at } });
+	await env.clock.flush();
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/, 'org B does not inherit org A readings');
+	assert.deepEqual(env.storageData['claude_session_history:org-b-0002'].history, [50]);
+	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [40, 45]);
+});
+
+test('U61 Session and Weekly are keyboard buttons that refresh and describe themselves (#6)', async () => {
+	const env = createUiEnv();
+	for (const [group, tooltip] of [[env.ui.sessionGroup, env.ui.sessionTooltip], [env.ui.weeklyGroup, env.ui.weeklyTooltip]]) {
+		assert.equal(group.getAttribute('role'), 'button');
+		assert.equal(group.getAttribute('tabindex'), '0');
+		assert.ok(tooltip.id, 'the tooltip has an id');
+		assert.equal(group.getAttribute('aria-describedby'), tooltip.id);
+	}
+	assert.equal(env.ui.tokenDisplay.getAttribute('aria-describedby'), env.ui.tokenTooltip.id);
+	const press = async (key) => {
+		let prevented = false;
+		for (const fn of env.ui.sessionGroup.listeners.keydown) await fn({ key, preventDefault: () => { prevented = true; } });
+		return prevented;
+	};
+	assert.equal(await press('Enter'), true);
+	assert.equal(env.refreshes.length, 1);
+	assert.equal(await press(' '), true);
+	assert.equal(env.refreshes.length, 2);
+	assert.equal(await press('a'), false);
+	assert.equal(env.refreshes.length, 2);
+});
+
+test('U62 tooltips appear on keyboard focus and hide on blur (#6)', () => {
+	const env = createUiEnv();
+	for (const fn of env.ui.weeklyGroup.listeners.focus) fn({});
+	assert.equal(env.ui.weeklyTooltip.style.visibility, 'visible');
+	for (const fn of env.ui.weeklyGroup.listeners.blur) fn({});
+	assert.equal(env.ui.weeklyTooltip.style.visibility, 'hidden');
+});
+
+test('U63 Spanish pages get whole tooltips and token texts in Spanish, not just the labels (#6)', async () => {
+	const env = createUiEnv({ lang: 'es-ES' });
+	const english = /quota|used|remaining|Resets|local time|Click|No data|Recent|Fill|Counting|unavailable|Approximate|Reset time/;
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, english);
+	assert.match(env.ui.sessionTooltip.textContent, /Cuota de sesión · 5 horas/);
+	const resets_at = iso(START + HOUR);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at }, seven_day: { expired: true } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at }, seven_day: { expired: true } });
+	await env.clock.flush();
+	for (const tip of [env.ui.sessionTooltip, env.ui.weeklyTooltip, env.ui.tokenTooltip]) assert.doesNotMatch(tip.textContent, english);
+	assert.match(env.ui.sessionTooltip.textContent, /45% usado · 55% restante/);
+	assert.match(env.ui.sessionTooltip.textContent, /Lecturas recientes: 40% → 45%/);
+	assert.match(env.ui.weeklyTooltip.textContent, /Cuota semanal/);
+	env.ui.setUsage(null);
+	assert.equal(env.ui.sessionPctSpan.textContent, 'sin datos aún');
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'loading' });
+	assert.equal(env.ui.tokenDisplay.textContent, 'Contando…');
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'error' });
+	assert.equal(env.ui.tokenDisplay.textContent, 'Tokens no disponibles');
+});

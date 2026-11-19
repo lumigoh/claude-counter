@@ -3,23 +3,50 @@
 
 	const CC = (globalThis.ClaudeCounter = globalThis.ClaudeCounter || {});
 
+	// Every user-visible string, per language (#6). The page language decides; anything not Spanish
+	// falls back to English. Keep both tables complete: a missing key would show "undefined".
 	const IS_ES = /^es\b/i.test(document.documentElement.lang || globalThis.navigator?.language || '');
 	const L = IS_ES
 		? {
 				session: 'Sesión',
 				weekly: 'Semana',
-				resetsIn: 'Se reinicia en',
-				sessionTip: 'Ventana de uso de 5 horas.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.',
-				weeklyTip: 'Ventana de uso de 7 días.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.'
+				resetsIn: 'se reinicia en',
+				noData: 'sin datos aún',
+				sessionHeading: 'Cuota de sesión · 5 horas',
+				weeklyHeading: 'Cuota semanal · 7 días, todos los modelos',
+				noDataTip: 'Aún no hay datos. Envía un mensaje o haz clic en las barras para actualizar.',
+				expiredTip: 'Se alcanzó la hora de reinicio. Actualiza para confirmar tu cuota disponible.',
+				usedRemaining: (used, left) => `${used}% usado · ${left}% restante`,
+				resetsAtLocal: (time) => `Se reinicia ${time} (hora local)`,
+				legend: 'Relleno = uso · marca = tiempo transcurrido',
+				recentReadings: (list) => `Lecturas recientes: ${list}`,
+				clickToRefresh: 'Haz clic en las barras para actualizar.',
+				tokensPlaceholder: 'Tokens: —',
+				tokens: (n) => `~${n} tokens`,
+				tokensUnavailable: 'Tokens no disponibles',
+				counting: 'Contando…',
+				tokenTip: 'Tokens aproximados de la conversación\nCuenta el historial visible del chat, no el contexto activo de Claude.\nPuede ser inexacto tras una compactación. Haz clic en el recuento para volver a contar.'
 			}
 		: {
 				session: 'Session',
 				weekly: 'Weekly',
 				resetsIn: 'resets in',
-				sessionTip: '5-hour session window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.',
-				weeklyTip: '7-day usage window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.'
+				noData: 'no data yet',
+				sessionHeading: 'Session quota · 5 hours',
+				weeklyHeading: 'Weekly quota · 7 days, all models',
+				noDataTip: 'No data yet. Send a message or click the bars to refresh.',
+				expiredTip: 'Reset time reached. Refresh to confirm your available quota.',
+				usedRemaining: (used, left) => `${used}% used · ${left}% remaining`,
+				resetsAtLocal: (time) => `Resets ${time} (local time)`,
+				legend: 'Fill = usage · tick = time elapsed',
+				recentReadings: (list) => `Recent readings: ${list}`,
+				clickToRefresh: 'Click the bars to refresh.',
+				tokensPlaceholder: 'Tokens: —',
+				tokens: (n) => `~${n} tokens`,
+				tokensUnavailable: 'Tokens unavailable',
+				counting: 'Counting…',
+				tokenTip: 'Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.'
 			};
-
 
 	function formatResetCountdown(timestampMs) {
 		// <= 0: reset time reached
@@ -45,11 +72,16 @@
 		return `${days}d ${remHours}h`;
 	}
 
+	let tooltipCount = 0;
+
 	function setupTooltip(element, tooltip, { topOffset = 10 } = {}) {
 		if (!element || !tooltip) return;
 		if (element.hasAttribute('data-tooltip-setup')) return;
 		element.setAttribute('data-tooltip-setup', 'true');
 		element.classList.add('cc-tooltipTrigger');
+		// Screen readers announce the tooltip as the trigger's description (#6).
+		if (!tooltip.id) tooltip.id = `cc-tooltip-${++tooltipCount}`;
+		element.setAttribute('aria-describedby', tooltip.id);
 
 		let pressTimer;
 		let hideTimer;
@@ -104,6 +136,10 @@
 		element.addEventListener('pointerleave', (e) => {
 			if (e.pointerType === 'mouse') hide();
 		});
+
+		// Keyboard users get the same tooltip while the trigger has focus.
+		element.addEventListener('focus', show);
+		element.addEventListener('blur', hide);
 	}
 
 	function makeTooltip(text) {
@@ -132,6 +168,24 @@
 			this.sessionHistory = [];
 			this.sessionResetKey = null;
 			this.refreshingUsage = false;
+			this.orgId = null;
+		}
+
+		/**
+		 * The active organisation (set by main.js). Recent session readings are stored per
+		 * organisation, so switching never mixes one org's readings into another's tooltip (#6).
+		 */
+		setOrg(orgId) {
+			if (orgId === this.orgId) return;
+			this.orgId = orgId || null;
+			this.sessionHistory = [];
+			this.sessionResetKey = null;
+			this._updateSessionTooltip();
+		}
+
+		/** Storage key for the readings, or null while the organisation is unknown (memory only). */
+		_historyKey() {
+			return this.orgId ? `claude_session_history:${this.orgId}` : null;
 		}
 
 		getProgressChrome() {
@@ -279,7 +333,7 @@
 			this.tokenDisplay = document.createElement('button');
 			this.tokenDisplay.type = 'button';
 			this.tokenDisplay.className = 'cc-tokenCounter cc-hidden';
-			this.tokenDisplay.textContent = 'Tokens: —';
+			this.tokenDisplay.textContent = L.tokensPlaceholder;
 			this.tokenDisplay.addEventListener('click', (event) => {
 				event.stopPropagation();
 				this.onTokenCounterRefresh();
@@ -289,10 +343,17 @@
 			this.quotaGroups.className = 'cc-quotaGroups';
 			this.usageLine.appendChild(this.quotaGroups);
 			const makeGroup = (label) => {
+				// A focusable button: Tab reaches it, Enter/Space refresh, and its accessible name is its
+				// visible text ("Session: 9% · resets in 4h"), so no aria-label overrides it (#6).
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
-				group.setAttribute('role', 'group');
-				group.setAttribute('aria-label', `${label} usage`);
+				group.setAttribute('role', 'button');
+				group.setAttribute('tabindex', '0');
+				group.addEventListener('keydown', (event) => {
+					if (event.key !== 'Enter' && event.key !== ' ') return;
+					event.preventDefault();
+					return this._requestUsageRefresh();
+				});
 				const span = document.createElement('span');
 				span.className = 'cc-usageText';
 				const labelEl = document.createElement('span');
@@ -308,7 +369,7 @@
 				bar.appendChild(marker);
 				const pct = document.createElement('span');
 				pct.className = 'cc-usagePct';
-				pct.textContent = 'no data yet';
+				pct.textContent = L.noData;
 				const reset = document.createElement('span');
 				reset.className = 'cc-usageReset';
 				for (const el of [labelEl, bar, pct, reset]) span.appendChild(el);
@@ -330,28 +391,31 @@
 
 			this.refreshProgressChrome();
 
-			this.usageLine.addEventListener('click', async () => {
-				if (!this.onUsageRefresh || this.refreshingUsage) return;
-				this.refreshingUsage = true;
-				this.usageLine.classList.add('cc-usageRow--dim');
-				try {
-					await this.onUsageRefresh();
-				} finally {
-					this.usageLine.classList.remove('cc-usageRow--dim');
-					this.refreshingUsage = false;
-				}
-			});
+			this.usageLine.addEventListener('click', () => this._requestUsageRefresh());
+		}
+
+		/** Mouse click on the row and Enter/Space on a quota button share one refresh. */
+		async _requestUsageRefresh() {
+			if (!this.onUsageRefresh || this.refreshingUsage) return;
+			this.refreshingUsage = true;
+			this.usageLine.classList.add('cc-usageRow--dim');
+			try {
+				await this.onUsageRefresh();
+			} finally {
+				this.usageLine.classList.remove('cc-usageRow--dim');
+				this.refreshingUsage = false;
+			}
 		}
 
 		setTokenCounter({ enabled, active, totalTokens, status }) {
 			const visible = enabled && active;
 			this.tokenDisplay.classList.toggle('cc-hidden', !visible);
 			this.usageLine.classList.toggle('cc-usageRow--tokens', visible);
-			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? `~${totalTokens.toLocaleString()} tokens` : status === 'error' ? 'Tokens unavailable' : 'Counting…';
+			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? L.tokens(totalTokens.toLocaleString()) : status === 'error' ? L.tokensUnavailable : L.counting;
 		}
 
 		_setupTooltips() {
-			this.tokenTooltip = makeTooltip('Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.');
+			this.tokenTooltip = makeTooltip(L.tokenTip);
 			setupTooltip(this.tokenDisplay, this.tokenTooltip, { topOffset: 8 });
 			this.sessionTooltip = makeTooltip(
 				this._usageTooltipText('session')
@@ -444,16 +508,16 @@
 
 		_usageTooltipText(key) {
 			const w = this._tooltipUsage?.[key === 'session' ? 'five_hour' : 'seven_day'];
-			const heading = key === 'session' ? `${L.session} quota · 5 hours` : `${L.weekly} quota · 7 days, all models`;
-			if (!w) return `${heading}\nNo data yet. Send a message or click the bars to refresh.`;
-			if (w.expired) return `${heading}\nReset time reached. Refresh to confirm your available quota.`;
+			const heading = key === 'session' ? L.sessionHeading : L.weeklyHeading;
+			if (!w) return `${heading}\n${L.noDataTip}`;
+			if (w.expired) return `${heading}\n${L.expiredTip}`;
 			const pct = Math.round(Math.max(0, Math.min(100, w.utilization)) * 10) / 10;
-			const lines = [heading, `${pct}% used · ${Math.round((100 - pct) * 10) / 10}% remaining`];
+			const lines = [heading, L.usedRemaining(pct, Math.round((100 - pct) * 10) / 10)];
 			const resetMs = w.resets_at ? Date.parse(w.resets_at) : NaN;
-			if (Number.isFinite(resetMs)) lines.push(`Resets ${new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (local time)`);
-			lines.push('Fill = usage · tick = time elapsed');
-			if (key === 'session' && this.sessionHistory.length > 1) lines.push(`Recent readings: ${this.sessionHistory.map((v) => `${v}%`).join(' → ')}`);
-			lines.push('Click the bars to refresh.');
+			if (Number.isFinite(resetMs)) lines.push(L.resetsAtLocal(new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })));
+			lines.push(L.legend);
+			if (key === 'session' && this.sessionHistory.length > 1) lines.push(L.recentReadings(this.sessionHistory.map((v) => `${v}%`).join(' → ')));
+			lines.push(L.clickToRefresh);
 			return lines.join('\n');
 		}
 
@@ -469,7 +533,10 @@
 				return;
 			}
 
+			const key = this._historyKey();
+			const orgAtStart = this.orgId;
 			const processHistory = (storedResetsAt, storedHistory) => {
+				if (this.orgId !== orgAtStart) return; // the org changed while storage was being read
 				let history = [];
 				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
 					history = [...storedHistory];
@@ -492,9 +559,9 @@
 				this._updateSessionTooltip();
 
 				try {
-					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+					if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
 						chrome.storage.local.set({
-							claude_session_history: { version: 2, resets_at: resetsAt, history }
+							[key]: { version: 2, resets_at: resetsAt, history }
 						});
 					}
 				} catch (e) {
@@ -505,9 +572,9 @@
 			if (this.sessionResetKey !== resetsAt) {
 				this.sessionResetKey = resetsAt;
 				try {
-					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-						chrome.storage.local.get(['claude_session_history'], (result) => {
-							const data = result?.claude_session_history;
+					if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
+						chrome.storage.local.get([key], (result) => {
+							const data = result?.[key];
 							processHistory(data?.version === 2 ? data.resets_at : null, data?.history);
 						});
 					} else {
@@ -540,7 +607,7 @@
 				return { resetMs, startMs: resetMs ? resetMs - windowMs : null, pct, live: true };
 			}
 
-			pctSpan.textContent = w && w.expired ? '0%' : 'no data yet';
+			pctSpan.textContent = w && w.expired ? '0%' : L.noData;
 			resetSpan.textContent = '';
 			fill.style.width = '0%';
 			fill.classList.remove('cc-caution', 'cc-warn', 'cc-full');
