@@ -16,7 +16,7 @@
 	};
 
 	class OptionalTokenCounter {
-		constructor({ ui, bridgeReady, getOrgId }) {
+		constructor({ ui, bridgeReady, getOrgId, onActiveOrgChange }) {
 			this.ui = ui;
 			this.bridgeReady = bridgeReady;
 			this.getOrgId = getOrgId;
@@ -33,12 +33,11 @@
 				this._render();
 				if (this.enabled) this.refresh();
 			};
-			CC.bridge.on('cc:org_detected', (payload) => {
-				if (!payload?.orgId) return;
-				const switched = this.lastOrgId && payload.orgId !== this.lastOrgId;
-				this.lastOrgId = payload.orgId;
+			// Follow the content script's *active* organisation (issue #2). IDs merely seen in page
+			// requests are not switches; reacting to them used to throw away valid counts.
+			onActiveOrgChange?.((orgId, previous) => {
 				if (!this.enabled) return;
-				if (switched) navigate();
+				if (previous) navigate();
 				else if (!this.hasCount) this.refresh();
 			});
 			window.addEventListener('cc:urlchange', navigate);
@@ -86,7 +85,6 @@
 					const orgId = await this.getOrgId();
 					if (!current()) return null;
 					if (!orgId) throw new Error('Organisation unavailable');
-					this.lastOrgId = orgId;
 					const data = await CC.bridge.requestConversation(orgId, chatId);
 					if (!current()) return null;
 					if (!Array.isArray(data?.chat_messages)) throw new Error('Conversation unavailable');

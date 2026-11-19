@@ -452,10 +452,12 @@ test('F11 an unknown organisation becoming known retains its stream watermark', 
 	assert.equal(limits(env).length, 1);
 });
 
-test('F12 switching organisations separates cursors and drops frames from the old open stream', async () => {
+test('F12 organisations keep separate cursors; an old stream keeps its own label for the content script to judge', async () => {
+	// 2.1.8 (#2): the bridge no longer drops streams when another ID appears. Labels come from the
+	// lastActiveOrg cookie at open time; main.js drops messages whose label is not the active org.
 	let oldController;
 	let openOld = true;
-	const env = createBridgeEnv({ originalFetch: async (url) => {
+	const env = createBridgeEnv({ cookie: 'lastActiveOrg=org-a', originalFetch: async (url) => {
 		if (!String(url).includes('StreamTimeline')) return new Response('{}');
 		if (openOld) {
 			openOld = false;
@@ -463,14 +465,13 @@ test('F12 switching organisations separates cursors and drops frames from the ol
 		}
 		return streamResponse([quotaFrame('2000-1', [['5h', 1, 1791749400, 0.1]])]);
 	} });
-	await env.fetch('https://claude.ai/api/organizations/org-a/usage');
 	const old = await env.fetch(STREAM_URL, { method: 'POST' }); await settle();
-	await env.fetch('https://claude.ai/api/organizations/org-b/usage');
+	env.document.cookie = 'lastActiveOrg=org-b';
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
 	oldController.enqueue(quotaFrame('3000-1', [['5h', 1, 1791749400, 0.41]])); oldController.close();
 	await readAll(old); await settle();
-	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4, 0.1]);
-	assert.equal(env.messages.filter((m) => m.type === 'cc:message_limit').at(-1).meta.orgId, 'org-b');
+	const sent = env.messages.filter((m) => m.type === 'cc:message_limit').map((m) => [m.meta.orgId, m.payload.windows['5h'].utilization]);
+	assert.deepEqual(sent, [['org-a', 0.4], ['org-b', 0.1], ['org-a', 0.41]], 'the same cursor in org-b is not a replay of org-a');
 });
 
 test('F13 missing or slightly changed future reset times cannot bypass a newer cursor', async () => {

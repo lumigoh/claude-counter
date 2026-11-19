@@ -16,19 +16,26 @@
 
 	// Capture original fetch before anyone else can wrap it
 	const originalFetch = window.fetch;
-	let activeOrgId = null;
-	let orgEpoch = 0;
-	function rememberOrg(id) {
-		if (!id) return;
-		if (activeOrgId && activeOrgId !== id) orgEpoch++;
-		activeOrgId = id;
-	}
-	function streamScope() {
-		if (!activeOrgId) {
-			try { rememberOrg((document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1]); } catch {}
+
+	// Stream labels (2.1.8, issue #2). Every stream is labelled with the organisation it belongs to
+	// and the time it opened, and both travel with each limits message as `meta`. The bridge does
+	// not decide which organisation is active: IDs it sees in requests are only reported as
+	// candidates (cc:org_detected). The content script knows the active organisation and drops
+	// messages from other organisations' streams (main.js handleMessageLimit).
+	//   * Legacy completion requests carry their organisation in the URL: that label is exact.
+	//   * Connect streams (StreamTimeline) do not, so they take the lastActiveOrg cookie at open
+	//     time, or null when it is unreadable.
+	function cookieOrgId() {
+		try {
+			return (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+		} catch {
+			return null;
 		}
-		return { orgId: activeOrgId, epoch: orgEpoch };
 	}
+	function streamScope(urlOrgId) {
+		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now() };
+	}
+	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -60,11 +67,10 @@
 		// Detect and broadcast active orgId from any Claude API requests
 		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
 		if (orgMatch && orgMatch[1]) {
-			rememberOrg(orgMatch[1]);
 			post('cc:org_detected', { orgId: orgMatch[1] });
 		}
 
-		const scope = streamScope();
+		const scope = streamScope(orgMatch?.[1] || null);
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
@@ -132,7 +138,7 @@
 						const json = JSON.parse(raw);
 						const limits = json?.message_limit || (json?.type === 'message_limit' ? json : null);
 						if (limits && typeof limits === 'object') {
-							if (!scope || scope.epoch === orgEpoch) post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
+							post('cc:message_limit', limits, scopeMeta(scope));
 						}
 					} catch {
 						// ignore
@@ -427,11 +433,13 @@
 	function olderOrEqual(a, b) {
 		return a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
 	}
+	// Replay and ordering protection. Both maps are keyed by the stream's organisation label, so
+	// organisations never share cursors, and a stream opened under A stays valid after the user
+	// visits B and comes back (the old global epoch counter silenced it for good).
 	function freshLimits(bytes, limits, scope) {
-		if (scope && scope.epoch !== orgEpoch) return null;
-		const epoch = scope?.epoch ?? orgEpoch;
+		const orgKey = scope.orgId || '';
 		const id = eventIdOf(bytes);
-		const seenKey = JSON.stringify([epoch, id]);
+		const seenKey = JSON.stringify([orgKey, id]);
 		if (id && seenEventIds.has(seenKey)) return null;
 		if (id) {
 			seenEventIds.add(seenKey);
@@ -441,7 +449,7 @@
 		if (!cursor) return limits;
 		const windows = {};
 		for (const [key, value] of Object.entries(limits.windows)) {
-			const windowKey = JSON.stringify([epoch, key]);
+			const windowKey = JSON.stringify([orgKey, key]);
 			const previous = windowCursors.get(windowKey);
 			if (previous && olderOrEqual(cursor, previous.cursor)) {
 				// Reset identifiers may be missing or corrected. Only a provably new window
@@ -468,7 +476,7 @@
 		const parsed = extractLimits(bytes);
 		const limits = parsed && freshLimits(bytes, parsed, scope);
 		if (limits) {
-			post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
+			post('cc:message_limit', limits, scopeMeta(scope));
 			post('cc:turn_end', {});
 		}
 	}

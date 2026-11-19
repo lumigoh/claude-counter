@@ -119,19 +119,26 @@ const chrome = (() => {
 
 	// Capture original fetch before anyone else can wrap it
 	const originalFetch = window.fetch;
-	let activeOrgId = null;
-	let orgEpoch = 0;
-	function rememberOrg(id) {
-		if (!id) return;
-		if (activeOrgId && activeOrgId !== id) orgEpoch++;
-		activeOrgId = id;
-	}
-	function streamScope() {
-		if (!activeOrgId) {
-			try { rememberOrg((document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1]); } catch {}
+
+	// Stream labels (2.1.8, issue #2). Every stream is labelled with the organisation it belongs to
+	// and the time it opened, and both travel with each limits message as `meta`. The bridge does
+	// not decide which organisation is active: IDs it sees in requests are only reported as
+	// candidates (cc:org_detected). The content script knows the active organisation and drops
+	// messages from other organisations' streams (main.js handleMessageLimit).
+	//   * Legacy completion requests carry their organisation in the URL: that label is exact.
+	//   * Connect streams (StreamTimeline) do not, so they take the lastActiveOrg cookie at open
+	//     time, or null when it is unreadable.
+	function cookieOrgId() {
+		try {
+			return (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+		} catch {
+			return null;
 		}
-		return { orgId: activeOrgId, epoch: orgEpoch };
 	}
+	function streamScope(urlOrgId) {
+		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now() };
+	}
+	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -163,11 +170,10 @@ const chrome = (() => {
 		// Detect and broadcast active orgId from any Claude API requests
 		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
 		if (orgMatch && orgMatch[1]) {
-			rememberOrg(orgMatch[1]);
 			post('cc:org_detected', { orgId: orgMatch[1] });
 		}
 
-		const scope = streamScope();
+		const scope = streamScope(orgMatch?.[1] || null);
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
@@ -235,7 +241,7 @@ const chrome = (() => {
 						const json = JSON.parse(raw);
 						const limits = json?.message_limit || (json?.type === 'message_limit' ? json : null);
 						if (limits && typeof limits === 'object') {
-							if (!scope || scope.epoch === orgEpoch) post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
+							post('cc:message_limit', limits, scopeMeta(scope));
 						}
 					} catch {
 						// ignore
@@ -530,11 +536,13 @@ const chrome = (() => {
 	function olderOrEqual(a, b) {
 		return a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
 	}
+	// Replay and ordering protection. Both maps are keyed by the stream's organisation label, so
+	// organisations never share cursors, and a stream opened under A stays valid after the user
+	// visits B and comes back (the old global epoch counter silenced it for good).
 	function freshLimits(bytes, limits, scope) {
-		if (scope && scope.epoch !== orgEpoch) return null;
-		const epoch = scope?.epoch ?? orgEpoch;
+		const orgKey = scope.orgId || '';
 		const id = eventIdOf(bytes);
-		const seenKey = JSON.stringify([epoch, id]);
+		const seenKey = JSON.stringify([orgKey, id]);
 		if (id && seenEventIds.has(seenKey)) return null;
 		if (id) {
 			seenEventIds.add(seenKey);
@@ -544,7 +552,7 @@ const chrome = (() => {
 		if (!cursor) return limits;
 		const windows = {};
 		for (const [key, value] of Object.entries(limits.windows)) {
-			const windowKey = JSON.stringify([epoch, key]);
+			const windowKey = JSON.stringify([orgKey, key]);
 			const previous = windowCursors.get(windowKey);
 			if (previous && olderOrEqual(cursor, previous.cursor)) {
 				// Reset identifiers may be missing or corrected. Only a provably new window
@@ -571,7 +579,7 @@ const chrome = (() => {
 		const parsed = extractLimits(bytes);
 		const limits = parsed && freshLimits(bytes, parsed, scope);
 		if (limits) {
-			post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
+			post('cc:message_limit', limits, scopeMeta(scope));
 			post('cc:turn_end', {});
 		}
 	}
@@ -1078,7 +1086,7 @@ const chrome = (() => {
 	};
 
 	class OptionalTokenCounter {
-		constructor({ ui, bridgeReady, getOrgId }) {
+		constructor({ ui, bridgeReady, getOrgId, onActiveOrgChange }) {
 			this.ui = ui;
 			this.bridgeReady = bridgeReady;
 			this.getOrgId = getOrgId;
@@ -1095,12 +1103,11 @@ const chrome = (() => {
 				this._render();
 				if (this.enabled) this.refresh();
 			};
-			CC.bridge.on('cc:org_detected', (payload) => {
-				if (!payload?.orgId) return;
-				const switched = this.lastOrgId && payload.orgId !== this.lastOrgId;
-				this.lastOrgId = payload.orgId;
+			// Follow the content script's *active* organisation (issue #2). IDs merely seen in page
+			// requests are not switches; reacting to them used to throw away valid counts.
+			onActiveOrgChange?.((orgId, previous) => {
 				if (!this.enabled) return;
-				if (switched) navigate();
+				if (previous) navigate();
 				else if (!this.hasCount) this.refresh();
 			});
 			window.addEventListener('cc:urlchange', navigate);
@@ -1148,7 +1155,6 @@ const chrome = (() => {
 					const orgId = await this.getOrgId();
 					if (!current()) return null;
 					if (!orgId) throw new Error('Organisation unavailable');
-					this.lastOrgId = orgId;
 					const data = await CC.bridge.requestConversation(orgId, chatId);
 					if (!current()) return null;
 					if (!Array.isArray(data?.chat_messages)) throw new Error('Conversation unavailable');
@@ -1828,6 +1834,28 @@ function start() {
 	if (CC.__started) return;
 	CC.__started = true;
 
+	// ---------------------------------------------------------------------------------------------
+	// Active organisation (2.1.8, issue #2)
+	//
+	// Quotas belong to one organisation, so everything below is keyed by `currentOrgId`. Two kinds of
+	// evidence exist and they are deliberately treated differently:
+	//
+	//   * Trusted sources say which organisation the user *picked*:
+	//       1. the `lastActiveOrg` cookie claude.ai sets when you choose an organisation,
+	//       2. claude.ai's own saved setting in page localStorage,
+	//       3. the /api/organizations list, but only when it marks exactly one org `active`.
+	//     A trusted answer that differs from `currentOrgId` is a genuine switch.
+	//
+	//   * Candidates are IDs merely *seen* in the page's requests (`cc:org_detected`). claude.ai can
+	//     request other organisations too (team + personal accounts), so a candidate never switches
+	//     the active org by itself, however often it appears. It is only used to bootstrap when
+	//     nothing else is known, and to prompt a (rate-limited) re-check of the trusted sources.
+	//
+	// At start-up, when no trusted source answers, the remembered org (`claude_last_org_id`), the
+	// only org in the list, or the first candidate are used, in that order. Without a cookie, a
+	// later candidate only moves us if a trusted source confirms it; otherwise the current org stays.
+	// ---------------------------------------------------------------------------------------------
+
 	function getOrgIdFromCookie() {
 		try {
 			return document.cookie
@@ -1839,54 +1867,121 @@ function start() {
 		}
 	}
 
+	/** Trusted sources that can be read synchronously and cheaply (safe to call every second). */
+	function readTrustedOrgSync() {
+		const fromCookie = getOrgIdFromCookie();
+		if (fromCookie) return fromCookie;
+		try {
+			return localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId') || null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** An org list entry's ID. `uuid` is the string used in URLs; a numeric `id` is not an org ID. */
+	function orgListId(org) {
+		const id = org?.uuid ?? org?.id;
+		return typeof id === 'string' && id ? id : null;
+	}
+
+	/**
+	 * Reads /api/organizations. Returns { active, single }: `active` only when exactly one org is
+	 * marked active (trusted), `single` when the account has exactly one org (start-up fallback).
+	 */
+	async function readOrgList() {
+		try {
+			const res = await fetch('https://claude.ai/api/organizations', { credentials: 'include' });
+			if (!res?.ok) return null;
+			const orgs = await res.json();
+			if (!Array.isArray(orgs)) return null;
+			const active = orgs.filter((o) => o?.active);
+			return {
+				active: active.length === 1 ? orgListId(active[0]) : null,
+				single: orgs.length === 1 ? orgListId(orgs[0]) : null
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	function readRememberedOrg() {
+		return new Promise((resolve) => {
+			try {
+				if (typeof chrome === 'undefined' || !chrome.storage?.local) return resolve(null);
+				chrome.storage.local.get(['claude_last_org_id'], (stored) => resolve(stored?.claude_last_org_id || null));
+			} catch {
+				resolve(null);
+			}
+		});
+	}
+
+	let lastCandidateOrgId = null;
+
+	/** Resolves the active organisation, bootstrapping it on first use. */
 	async function getOrgId() {
 		if (currentOrgId) return currentOrgId;
 
-		const fromCookie = getOrgIdFromCookie();
-		if (fromCookie) {
-			updateOrgIdIfNeeded(fromCookie);
+		const trusted = readTrustedOrgSync();
+		if (trusted) {
+			acceptActiveOrg(trusted);
 			return currentOrgId;
 		}
 
-		try {
-			const lsOrg = localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId');
-			if (lsOrg) {
-				updateOrgIdIfNeeded(lsOrg);
-				return currentOrgId;
-			}
-		} catch {}
+		const remembered = await readRememberedOrg();
+		if (currentOrgId) return currentOrgId; // resolved by someone else while we waited
+		if (remembered) {
+			acceptActiveOrg(remembered);
+			return currentOrgId;
+		}
 
-		try {
-			if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-				const stored = await new Promise((r) => chrome.storage.local.get(['claude_last_org_id'], r));
-				if (currentOrgId) return currentOrgId;
-				if (stored?.claude_last_org_id) {
-					updateOrgIdIfNeeded(stored.claude_last_org_id);
-					return currentOrgId;
-				}
-			}
-		} catch {}
+		const list = await readOrgList();
+		if (currentOrgId) return currentOrgId;
+		const fromList = list?.active || list?.single || lastCandidateOrgId;
+		if (fromList) acceptActiveOrg(fromList);
+		return currentOrgId;
+	}
 
-		try {
-			const res = await fetch('https://claude.ai/api/organizations', { credentials: 'include' });
-			if (res.ok) {
-				const orgs = await res.json();
-				if (currentOrgId) return currentOrgId;
-				if (Array.isArray(orgs) && orgs.length > 0) {
-					const activeOrg = orgs.find((o) => o?.active) || orgs[0];
-					const id = activeOrg?.id || activeOrg?.uuid;
-					if (id) {
-						updateOrgIdIfNeeded(id);
-						if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-							chrome.storage.local.set({ claude_last_org_id: id });
-						}
-						return currentOrgId;
-					}
-				}
-			}
-		} catch {}
+	// Without a cookie, a candidate that differs from the active org asks the org list again, at most
+	// once per ORG_RECHECK_MS, and switches only if the list explicitly marks another org active.
+	const ORG_RECHECK_MS = 5 * 60 * 1000;
+	let lastOrgRecheckMs = -Infinity;
+	let orgRecheckInFlight = false;
 
-		return null;
+	async function recheckActiveOrg() {
+		const trusted = readTrustedOrgSync();
+		if (trusted) {
+			acceptActiveOrg(trusted);
+			return;
+		}
+		const now = Date.now();
+		if (orgRecheckInFlight || now - lastOrgRecheckMs < ORG_RECHECK_MS) return;
+		lastOrgRecheckMs = now;
+		orgRecheckInFlight = true;
+		try {
+			const list = await readOrgList();
+			if (list?.active) acceptActiveOrg(list.active);
+		} finally {
+			orgRecheckInFlight = false;
+		}
+	}
+
+	/** A request mentioned this org. Bootstrap from it if nothing is known; never switch on it alone. */
+	function handleOrgCandidate(orgId) {
+		if (!orgId || typeof orgId !== 'string') return;
+		lastCandidateOrgId = orgId;
+		if (!currentOrgId) {
+			getOrgId()
+				.then(() => { if (usageMissing()) return restoreUsageIfNeeded(); })
+				.catch(() => {});
+		} else if (orgId !== currentOrgId) {
+			recheckActiveOrg().catch(() => {});
+		}
+	}
+
+	/** Called every tick: a changed cookie (or page setting) is a genuine switch made without a reload. */
+	function checkTrustedOrgChange() {
+		const trusted = readTrustedOrgSync();
+		if (trusted && trusted !== currentOrgId) acceptActiveOrg(trusted);
 	}
 
 	/**
@@ -1998,6 +2093,10 @@ function start() {
 	}
 
 	let currentOrgId = null;
+	const orgChangeListeners = new Set();
+	// Time of the last genuine A -> B switch. Unlabelled stream events from streams opened before
+	// it may belong to the previous organisation, so they are dropped (see handleMessageLimit).
+	let lastOrgSwitchMs = -Infinity;
 	let orgRevision = 0;
 	const windowFreshness = {
 		five_hour: { revision: 0, resetMs: null },
@@ -2034,7 +2133,7 @@ function start() {
 
 	// Bridge must be ready before we can make requests
 	const bridgeReady = CC.injectBridgeOnce();
-	tokenCounter = new CC.OptionalTokenCounter({ ui, bridgeReady, getOrgId });
+	tokenCounter = new CC.OptionalTokenCounter({ ui, bridgeReady, getOrgId, onActiveOrgChange: (fn) => orgChangeListeners.add(fn) });
 
 	function windowResetMs(w) {
 		if (!w || w.expired || !w.resets_at) return null;
@@ -2094,17 +2193,27 @@ function start() {
 		return true;
 	}
 
-	function updateOrgIdIfNeeded(newOrgId) {
+	/**
+	 * Makes `newOrgId` the active organisation. Only trusted sources and start-up bootstrap call this.
+	 * A switch from another org clears what is on screen and in memory (snapshots on disk are kept per
+	 * organisation), invalidates in-flight polls via the revisions, then restores and polls the new org
+	 * straight away.
+	 */
+	function acceptActiveOrg(newOrgId) {
 		if (!newOrgId || typeof newOrgId !== 'string' || newOrgId === currentOrgId) return;
-		const switching = !!currentOrgId;
+		const previous = currentOrgId;
+		const switching = !!previous;
 		currentOrgId = newOrgId;
 		orgRevision++;
 		for (const meta of Object.values(windowFreshness)) {
 			meta.revision++;
 			meta.resetMs = null;
 		}
+		try {
+			if (typeof chrome !== 'undefined' && chrome.storage?.local) chrome.storage.local.set({ claude_last_org_id: newOrgId });
+		} catch {}
 		if (switching) {
-			// Quotas belong to an organisation, even when two IDs appeared in the same tab.
+			lastOrgSwitchMs = Date.now();
 			usageState = null;
 			lastUsageUpdateMs = 0;
 			lastUsageFetchMs = 0;
@@ -2112,8 +2221,18 @@ function start() {
 			usageEndpointEmpty = false;
 			usageFailures = 0;
 			lastRestore = { org: null, at: 0 };
-			nextUsageAttemptMs = Date.now();
+			// The deferred refresh below polls the new org now; the tick only takes over if it cannot.
+			nextUsageAttemptMs = Date.now() + USAGE_RETRY_MS;
 			ui.setUsage(null);
+			// Restore first so the snapshot shows while the poll is in flight. Deferred so callers
+			// (getOrgId, refreshUsage) finish their own bookkeeping before this runs.
+			Promise.resolve()
+				.then(() => restoreUsageIfNeeded())
+				.then(() => { if (!document.hidden && currentOrgId === newOrgId) return refreshUsage(); })
+				.catch(() => {});
+		}
+		for (const fn of orgChangeListeners) {
+			try { fn(newOrgId, previous); } catch {}
 		}
 	}
 
@@ -2186,7 +2305,6 @@ function start() {
 		await bridgeReady;
 		const orgId = await getOrgId();
 		if (!orgId) return;
-		updateOrgIdIfNeeded(orgId);
 
 		if (usageFetchInFlight) return;
 		usageFetchInFlight = true;
@@ -2251,23 +2369,25 @@ function start() {
 	});
 	window.addEventListener('focus', () => refreshUsageIfStale(60 * 1000));
 
+	/**
+	 * Limits from a reply. The bridge labels each stream with the organisation it was opened under
+	 * (`meta.orgId`, null when unknown) and when (`meta.openedAt`). Only the content script knows the
+	 * active organisation, so it decides here:
+	 *   - labelled with another org            -> dropped
+	 *   - unlabelled, opened before a switch   -> dropped (could be the previous org)
+	 *   - otherwise                            -> applied (freshness rules still apply)
+	 */
 	function handleMessageLimit(messageLimit, meta) {
-		if (meta?.orgId && currentOrgId && meta.orgId !== currentOrgId) return;
+		// A reply can arrive before start-up resolved the org; the cookie answers synchronously.
+		if (!currentOrgId) checkTrustedOrgChange();
+		if (meta?.orgId && meta.orgId !== currentOrgId) return;
+		if (!meta?.orgId && Number.isFinite(meta?.openedAt) && meta.openedAt < lastOrgSwitchMs) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
 	}
 
 	CC.bridge.on('cc:message_limit', handleMessageLimit);
-	CC.bridge.on('cc:org_detected', (payload) => {
-		if (payload?.orgId) {
-			updateOrgIdIfNeeded(payload.orgId);
-			if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-				chrome.storage.local.set({ claude_last_org_id: payload.orgId });
-			}
-			// The saved usage could not be matched earlier if the organisation was still unknown.
-			if (usageMissing()) restoreUsageIfNeeded().catch(() => {});
-		}
-	});
+	CC.bridge.on('cc:org_detected', (payload) => handleOrgCandidate(payload?.orgId));
 
 	async function isExtensionEnabled() {
 		try {
@@ -2296,8 +2416,7 @@ function start() {
 		});
 
 		// Usage is org-level: restore/refresh on every page, including home/new
-		const orgId = await getOrgId();
-		updateOrgIdIfNeeded(orgId);
+		await getOrgId();
 		if (usageMissing()) await restoreUsageIfNeeded();
 		if (!usageState && !lastUsageFetchMs && !usageFailures) await refreshUsage();
 		else refreshUsageIfStale(2 * 60 * 1000);
@@ -2315,6 +2434,7 @@ function start() {
 
 	function tick() {
 		if (!document.hidden) ui.tick();
+		checkTrustedOrgChange();
 
 		const now = Date.now();
 
