@@ -12,7 +12,7 @@ const BRIDGE_PATH = path.join(__dirname, '../../src/injected/bridge.js');
 const STREAM_URL = 'https://claude.ai/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline';
 const PERFORM_URL = 'https://claude.ai/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction';
 
-function createBridgeEnv({ originalFetch, location } = {}) {
+function createBridgeEnv({ originalFetch, location, cookie = '' } = {}) {
 	const source = fs.readFileSync(BRIDGE_PATH, 'utf8');
 	const messages = [];
 	const listeners = {};
@@ -32,7 +32,8 @@ function createBridgeEnv({ originalFetch, location } = {}) {
 	};
 	const history = { pushState() {}, replaceState() {} };
 	const documentElement = { dataset: {} };
-	const document = { documentElement };
+	// `cookie` is writable so tests can switch the active organisation the way claude.ai does.
+	const document = { documentElement, cookie };
 
 	new Function('window', 'history', 'document', 'location', source)(window, history, document, window.location);
 
@@ -40,6 +41,7 @@ function createBridgeEnv({ originalFetch, location } = {}) {
 		window,
 		messages,
 		documentElement,
+		document,
 		events(type) {
 			return messages.filter((m) => m && m.cc === 'ClaudeCounter' && m.type === type).map((m) => m.payload);
 		},

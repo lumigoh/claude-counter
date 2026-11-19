@@ -126,3 +126,10 @@ test('O08 an org list entry is identified by its uuid (a numeric id is not an or
 	await env.calls.uiOpts.onUsageRefresh();
 	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
 });
+
+test('O09 a labelled reply that arrives before start-up resolved the org is not lost when the cookie names it', async () => {
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.3, 3600], sevenD: null }), { orgId: ORG, openedAt: START });
+	assert.equal(env.lastUsage().five_hour.utilization, 30);
+});

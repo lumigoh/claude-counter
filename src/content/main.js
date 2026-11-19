@@ -549,6 +549,8 @@
 	 *   - otherwise                            -> applied (freshness rules still apply)
 	 */
 	function handleMessageLimit(messageLimit, meta) {
+		// A reply can arrive before start-up resolved the org; the cookie answers synchronously.
+		if (!currentOrgId) checkTrustedOrgChange();
 		if (meta?.orgId && meta.orgId !== currentOrgId) return;
 		if (!meta?.orgId && Number.isFinite(meta?.openedAt) && meta.openedAt < lastOrgSwitchMs) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
