@@ -12,7 +12,7 @@ const BRIDGE_PATH = path.join(__dirname, '../../src/injected/bridge.js');
 const STREAM_URL = 'https://claude.ai/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline';
 const PERFORM_URL = 'https://claude.ai/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction';
 
-function createBridgeEnv({ originalFetch, location, cookie = '' } = {}) {
+function createBridgeEnv({ originalFetch, location, cookie = '', nowMs } = {}) {
 	const source = fs.readFileSync(BRIDGE_PATH, 'utf8');
 	const messages = [];
 	const listeners = {};
@@ -35,7 +35,11 @@ function createBridgeEnv({ originalFetch, location, cookie = '' } = {}) {
 	// `cookie` is writable so tests can switch the active organisation the way claude.ai does.
 	const document = { documentElement, cookie };
 
-	new Function('window', 'history', 'document', 'location', source)(window, history, document, window.location);
+	// Event IDs start with the server's epoch milliseconds and the bridge compares them with the
+	// time a stream opened (replay detection, #4). Tests replaying recorded frames pin "now" to
+	// just after the recording with `nowMs`, so those frames count as live replies.
+	const BridgeDate = nowMs === undefined ? Date : class extends Date { static now() { return nowMs; } };
+	new Function('window', 'history', 'document', 'location', 'Date', source)(window, history, document, window.location, BridgeDate);
 
 	return {
 		window,
