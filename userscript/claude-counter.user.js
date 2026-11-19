@@ -1239,7 +1239,7 @@ if (!globalThis.GPTTokenizer_o200k_base) {
 function start() {
 	const style = document.createElement('style');
 	style.id = 'cc-userscript-styles';
-	style.textContent = "/* A portal above the floating composer softens the transcript's hard cut-off.\n   It ends before the usage row and never receives clicks, drags or scrolling. */\n.cc-composerFade {\n\tposition: fixed;\n\tz-index: 30;\n\tdisplay: none;\n\tpointer-events: none;\n\tuser-select: none;\n}\n\n/* Usage stays above the composer, clear of its menus and the viewport edge. */\n.cc-usageRow {\n\t--cc-text: hsl(var(--text-500, 40 3% 47%));\n\t--cc-text-strong: hsl(var(--text-300, 40 5% 30%));\n\tdisplay: flex;\n\talign-items: center;\n\tgap: 18px;\n\tfont-family: inherit;\n\tfont-size: 12px;\n\tline-height: 16px;\n\tletter-spacing: 0.01em;\n\tfont-variant-numeric: tabular-nums;\n\tcolor: var(--cc-text);\n\tcursor: pointer;\n\tuser-select: none;\n\ttransition: opacity 150ms ease;\n\twhite-space: nowrap;\n}\n\n.cc-usageRow:hover {\n\t--cc-text: hsl(var(--text-400, 40 3% 40%));\n}\n\n/* Normal flow reserves room instead of covering the editor or its controls. */\n.cc-usageRow--above {\n\tbox-sizing: border-box;\n\tjustify-content: flex-end;\n\tflex-wrap: nowrap;\n\trow-gap: 6px;\n\tcontainer: ccQuota / inline-size;\n\twidth: 100%;\n\tmin-width: 0;\n\tgrid-column: 1 / -1;\n\tflex: 0 0 auto;\n\tpadding: 4px 12px;\n\tmargin: 0 auto 8px;\n\tmax-width: 100%;\n}\n\n.cc-usageRow--dim {\n\topacity: 0.55;\n}\n\n.cc-usageGroup {\n\tdisplay: inline-flex;\n\talign-items: center;\n\tgap: 8px;\n\tflex: 0 0 auto;\n}\n\n.cc-usageLabel {\n\tcolor: var(--cc-text);\n}\n\n.cc-usagePct {\n\tcolor: var(--cc-text-strong);\n\tfont-weight: 500;\n\tmin-width: 3ch;\n\ttext-align: right;\n}\n\n.cc-usageReset {\n\tcolor: var(--cc-text);\n\topacity: 0.8;\n}\n\n.cc-usageText { display: contents; }\n\n.cc-usageReset:empty {\n\tdisplay: none;\n}\n\n/* Narrow layouts: drop the reset countdown (still in the tooltip / title) */\n.cc-compact .cc-usageReset {\n\tdisplay: none;\n}\n\n.cc-compact {\n\tgap: 12px;\n}\n\n/* Bars (mini + usage) */\n.cc-bar {\n\t--cc-radius: 3px;\n\t--cc-stroke: transparent;\n\t--cc-fill: transparent;\n\t--cc-fill-warn: var(--cc-fill);\n\t--cc-marker: transparent;\n\n\tposition: relative;\n\tbox-sizing: border-box;\n\twidth: 100%;\n\theight: 6px;\n\tborder-radius: var(--cc-radius);\n\tborder: 1px solid var(--cc-stroke);\n\toverflow: visible;\n\tuser-select: none;\n}\n\n.cc-bar__fill {\n\twidth: 0%;\n\theight: 100%;\n\tbackground: var(--cc-fill);\n\ttransition: width 300ms ease, background-color 300ms ease;\n\tborder-top-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-top-right-radius: 0;\n\tborder-bottom-right-radius: 0;\n}\n\n.cc-bar__fill.cc-full {\n\tborder-top-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n}\n\n.cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar__marker {\n\tposition: absolute;\n\ttop: 0;\n\tbottom: 0;\n\tleft: 0%;\n\twidth: 2px;\n\tbackground: var(--cc-marker);\n\tpointer-events: none;\n}\n\n/* Usage bars: slim pill, no outline, track derived from text colour */\n.cc-bar.cc-bar--usage {\n\t--cc-radius: 999px;\n\twidth: 64px;\n\theight: 4px;\n\tflex: 0 0 64px;\n\tborder: none;\n\tbackground: color-mix(in srgb, currentColor 22%, transparent);\n}\n\n.cc-bar--usage .cc-bar__fill {\n\tborder-radius: 999px;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-caution {\n\tbackground: #d4a017;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar--usage .cc-bar__marker {\n\ttop: -3px;\n\tbottom: -3px;\n\twidth: 1.5px;\n\tmargin-left: -0.75px;\n\tborder-radius: 1px;\n\tbackground: var(--cc-text-strong);\n\topacity: 0.85;\n}\n\n/* Tooltips */\n.cc-tooltip {\n\tposition: fixed;\n\tz-index: 2147483647;\n\tbox-sizing: border-box;\n\twidth: max-content;\n\tmax-width: min(330px, calc(100vw - 20px));\n\tmax-height: calc(100vh - 20px);\n\toverflow: auto;\n\tpadding: 10px 12px;\n\tborder: 1px solid #575753;\n\tborder-radius: 8px;\n\tbackground: #262624;\n\tcolor: #f5f5f0;\n\tbox-shadow: 0 4px 20px #0005;\n\tfont: 12px/1.5 system-ui, sans-serif;\n\ttext-align: left;\n\twhite-space: pre-line;\n\toverflow-wrap: anywhere;\n\tuser-select: none;\n\tpointer-events: none;\n\topacity: 0;\n\tvisibility: hidden;\n\tisolation: isolate;\n}\n\n.cc-tooltipTrigger {\n\t-webkit-touch-callout: none;\n\t-webkit-user-select: none;\n\tuser-select: none;\n\tcursor: help;\n}\n\n/* Hide optional elements completely (no layout space) */\n.cc-hidden, .cc-unmounted {\n\tdisplay: none !important;\n}\n\n/* Keep a single group within small phone viewports, including long reset text. */\n@media (max-width: 600px) {\n\t.cc-usageRow--above .cc-usageReset { display: none; }\n}\n\n/* The optional count stays left; quota groups stay right. */\n.cc-tokenCounter {\n\tappearance: none;\n\tborder: 0;\n\tbackground: transparent;\n\tcolor: inherit;\n\tfont: inherit;\n\tpadding: 0;\n\tcursor: pointer;\n\tflex: 0 0 auto;\n}\n.cc-tokenCounter { margin-right: auto; white-space: nowrap; line-height: inherit; height: auto; min-height: 0; }\n.cc-quotaGroups { display: flex; align-items: center; gap: 18px; margin-left: auto; min-width: 0; }\n.cc-tokenCounter:focus-visible { outline: 2px solid #6aa9e9; outline-offset: 3px; border-radius: 3px; }\n@container ccQuota (max-width: 760px) {\n\t.cc-usageRow--tokens .cc-usageReset { display: none; }\n}\n@container ccQuota (max-width: 480px) {\n\t.cc-usageReset, .cc-bar--usage, .cc-usageLabel { display: none; }\n\t.cc-usageGroup { gap: 4px; }\n\t.cc-quotaGroups { gap: 8px; }\n\t.cc-usageGroup--session::before { content: '5h'; }\n\t.cc-usageGroup--weekly::before { content: '7d'; }\n\t.cc-tokenCounter { font-size: 11px; }\n}\n";
+	style.textContent = "/* A portal above the floating composer softens the transcript's hard cut-off.\n   It ends before the usage row and never receives clicks, drags or scrolling. */\n.cc-composerFade {\n\tposition: fixed;\n\tz-index: 30;\n\tdisplay: none;\n\tpointer-events: none;\n\tuser-select: none;\n}\n\n/* Usage stays above the composer, clear of its menus and the viewport edge. */\n.cc-usageRow {\n\t--cc-text: hsl(var(--text-500, 40 3% 47%));\n\t--cc-text-strong: hsl(var(--text-300, 40 5% 30%));\n\tdisplay: flex;\n\talign-items: center;\n\tgap: 18px;\n\tfont-family: inherit;\n\tfont-size: 12px;\n\tline-height: 16px;\n\tletter-spacing: 0.01em;\n\tfont-variant-numeric: tabular-nums;\n\tcolor: var(--cc-text);\n\tcursor: pointer;\n\tuser-select: none;\n\ttransition: opacity 150ms ease;\n\twhite-space: nowrap;\n}\n\n.cc-usageRow:hover {\n\t--cc-text: hsl(var(--text-400, 40 3% 40%));\n}\n\n/* Normal flow reserves room instead of covering the editor or its controls. */\n.cc-usageRow--above {\n\tbox-sizing: border-box;\n\tjustify-content: flex-end;\n\tflex-wrap: nowrap;\n\trow-gap: 6px;\n\tcontainer: ccQuota / inline-size;\n\twidth: 100%;\n\tmin-width: 0;\n\tgrid-column: 1 / -1;\n\tflex: 0 0 auto;\n\tpadding: 4px 12px;\n\tmargin: 0 auto 8px;\n\tmax-width: 100%;\n}\n\n.cc-usageRow--dim {\n\topacity: 0.55;\n}\n\n.cc-usageGroup {\n\tdisplay: inline-flex;\n\talign-items: center;\n\tgap: 8px;\n\tflex: 0 0 auto;\n}\n\n.cc-usageLabel {\n\tcolor: var(--cc-text);\n}\n\n.cc-usagePct {\n\tcolor: var(--cc-text-strong);\n\tfont-weight: 500;\n\tmin-width: 3ch;\n\ttext-align: right;\n}\n\n.cc-usageReset {\n\tcolor: var(--cc-text);\n\topacity: 0.8;\n}\n\n.cc-usageText { display: contents; }\n\n.cc-usageReset:empty {\n\tdisplay: none;\n}\n\n/* Narrow layouts: drop the reset countdown (still in the tooltip / title) */\n.cc-compact .cc-usageReset {\n\tdisplay: none;\n}\n\n.cc-compact {\n\tgap: 12px;\n}\n\n/* Bars (mini + usage) */\n.cc-bar {\n\t--cc-radius: 3px;\n\t--cc-stroke: transparent;\n\t--cc-fill: transparent;\n\t--cc-fill-warn: var(--cc-fill);\n\t--cc-marker: transparent;\n\n\tposition: relative;\n\tbox-sizing: border-box;\n\twidth: 100%;\n\theight: 6px;\n\tborder-radius: var(--cc-radius);\n\tborder: 1px solid var(--cc-stroke);\n\toverflow: visible;\n\tuser-select: none;\n}\n\n.cc-bar__fill {\n\twidth: 0%;\n\theight: 100%;\n\tbackground: var(--cc-fill);\n\ttransition: width 300ms ease, background-color 300ms ease;\n\tborder-top-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-left-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-top-right-radius: 0;\n\tborder-bottom-right-radius: 0;\n}\n\n.cc-bar__fill.cc-full {\n\tborder-top-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n\tborder-bottom-right-radius: max(0px, calc(var(--cc-radius) - 1px));\n}\n\n.cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar__marker {\n\tposition: absolute;\n\ttop: 0;\n\tbottom: 0;\n\tleft: 0%;\n\twidth: 2px;\n\tbackground: var(--cc-marker);\n\tpointer-events: none;\n}\n\n/* Usage bars: slim pill, no outline, track derived from text colour */\n.cc-bar.cc-bar--usage {\n\t--cc-radius: 999px;\n\twidth: 64px;\n\theight: 4px;\n\tflex: 0 0 64px;\n\tborder: none;\n\tbackground: color-mix(in srgb, currentColor 22%, transparent);\n}\n\n.cc-bar--usage .cc-bar__fill {\n\tborder-radius: 999px;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-caution {\n\tbackground: #d4a017;\n}\n\n.cc-bar--usage .cc-bar__fill.cc-warn {\n\tbackground: var(--cc-fill-warn);\n}\n\n.cc-bar--usage .cc-bar__marker {\n\ttop: -3px;\n\tbottom: -3px;\n\twidth: 1.5px;\n\tmargin-left: -0.75px;\n\tborder-radius: 1px;\n\tbackground: var(--cc-text-strong);\n\topacity: 0.85;\n}\n\n/* Tooltips */\n.cc-tooltip {\n\tposition: fixed;\n\tz-index: 2147483647;\n\tbox-sizing: border-box;\n\twidth: max-content;\n\tmax-width: min(330px, calc(100vw - 20px));\n\tmax-height: calc(100vh - 20px);\n\toverflow: auto;\n\tpadding: 10px 12px;\n\tborder: 1px solid #575753;\n\tborder-radius: 8px;\n\tbackground: #262624;\n\tcolor: #f5f5f0;\n\tbox-shadow: 0 4px 20px #0005;\n\tfont: 12px/1.5 system-ui, sans-serif;\n\ttext-align: left;\n\twhite-space: pre-line;\n\toverflow-wrap: anywhere;\n\tuser-select: none;\n\tpointer-events: none;\n\topacity: 0;\n\tvisibility: hidden;\n\tisolation: isolate;\n}\n\n.cc-tooltipTrigger {\n\t-webkit-touch-callout: none;\n\t-webkit-user-select: none;\n\tuser-select: none;\n\tcursor: help;\n}\n\n/* Hide optional elements completely (no layout space) */\n.cc-hidden, .cc-unmounted {\n\tdisplay: none !important;\n}\n\n/* Keep a single group within small phone viewports, including long reset text. */\n@media (max-width: 600px) {\n\t.cc-usageRow--above .cc-usageReset { display: none; }\n}\n\n/* The optional count stays left; quota groups stay right. */\n.cc-tokenCounter {\n\tappearance: none;\n\tborder: 0;\n\tbackground: transparent;\n\tcolor: inherit;\n\tfont: inherit;\n\tpadding: 0;\n\tcursor: pointer;\n\tflex: 0 0 auto;\n}\n.cc-tokenCounter { margin-right: auto; white-space: nowrap; line-height: inherit; height: auto; min-height: 0; }\n.cc-quotaGroups { display: flex; align-items: center; gap: 18px; margin-left: auto; min-width: 0; }\n.cc-tokenCounter:focus-visible,\n.cc-usageGroup:focus-visible { outline: 2px solid #6aa9e9; outline-offset: 3px; border-radius: 3px; }\n@container ccQuota (max-width: 760px) {\n\t.cc-usageRow--tokens .cc-usageReset { display: none; }\n}\n@container ccQuota (max-width: 480px) {\n\t.cc-usageReset, .cc-bar--usage, .cc-usageLabel { display: none; }\n\t.cc-usageGroup { gap: 4px; }\n\t.cc-quotaGroups { gap: 8px; }\n\t.cc-usageGroup--session::before { content: '5h'; }\n\t.cc-usageGroup--weekly::before { content: '7d'; }\n\t.cc-tokenCounter { font-size: 11px; }\n}\n";
 	(document.head || document.documentElement).appendChild(style);
 
 // Source: src/content/ui.js
@@ -1290,11 +1290,16 @@ function start() {
 		return `${days}d ${remHours}h`;
 	}
 
+	let tooltipCount = 0;
+
 	function setupTooltip(element, tooltip, { topOffset = 10 } = {}) {
 		if (!element || !tooltip) return;
 		if (element.hasAttribute('data-tooltip-setup')) return;
 		element.setAttribute('data-tooltip-setup', 'true');
 		element.classList.add('cc-tooltipTrigger');
+		// Screen readers announce the tooltip as the trigger's description (#6).
+		if (!tooltip.id) tooltip.id = `cc-tooltip-${++tooltipCount}`;
+		element.setAttribute('aria-describedby', tooltip.id);
 
 		let pressTimer;
 		let hideTimer;
@@ -1349,6 +1354,10 @@ function start() {
 		element.addEventListener('pointerleave', (e) => {
 			if (e.pointerType === 'mouse') hide();
 		});
+
+		// Keyboard users get the same tooltip while the trigger has focus.
+		element.addEventListener('focus', show);
+		element.addEventListener('blur', hide);
 	}
 
 	function makeTooltip(text) {
@@ -1552,10 +1561,17 @@ function start() {
 			this.quotaGroups.className = 'cc-quotaGroups';
 			this.usageLine.appendChild(this.quotaGroups);
 			const makeGroup = (label) => {
+				// A focusable button: Tab reaches it, Enter/Space refresh, and its accessible name is its
+				// visible text ("Session: 9% · resets in 4h"), so no aria-label overrides it (#6).
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
-				group.setAttribute('role', 'group');
-				group.setAttribute('aria-label', `${label} usage`);
+				group.setAttribute('role', 'button');
+				group.setAttribute('tabindex', '0');
+				group.addEventListener('keydown', (event) => {
+					if (event.key !== 'Enter' && event.key !== ' ') return;
+					event.preventDefault();
+					return this._requestUsageRefresh();
+				});
 				const span = document.createElement('span');
 				span.className = 'cc-usageText';
 				const labelEl = document.createElement('span');
@@ -1593,17 +1609,20 @@ function start() {
 
 			this.refreshProgressChrome();
 
-			this.usageLine.addEventListener('click', async () => {
-				if (!this.onUsageRefresh || this.refreshingUsage) return;
-				this.refreshingUsage = true;
-				this.usageLine.classList.add('cc-usageRow--dim');
-				try {
-					await this.onUsageRefresh();
-				} finally {
-					this.usageLine.classList.remove('cc-usageRow--dim');
-					this.refreshingUsage = false;
-				}
-			});
+			this.usageLine.addEventListener('click', () => this._requestUsageRefresh());
+		}
+
+		/** Mouse click on the row and Enter/Space on a quota button share one refresh. */
+		async _requestUsageRefresh() {
+			if (!this.onUsageRefresh || this.refreshingUsage) return;
+			this.refreshingUsage = true;
+			this.usageLine.classList.add('cc-usageRow--dim');
+			try {
+				await this.onUsageRefresh();
+			} finally {
+				this.usageLine.classList.remove('cc-usageRow--dim');
+				this.refreshingUsage = false;
+			}
 		}
 
 		setTokenCounter({ enabled, active, totalTokens, status }) {

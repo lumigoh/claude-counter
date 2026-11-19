@@ -303,3 +303,33 @@ test('U60 recent session readings are kept per organisation; the old shared key 
 	assert.deepEqual(env.storageData['claude_session_history:org-b-0002'].history, [50]);
 	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [40, 45]);
 });
+
+test('U61 Session and Weekly are keyboard buttons that refresh and describe themselves (#6)', async () => {
+	const env = createUiEnv();
+	for (const [group, tooltip] of [[env.ui.sessionGroup, env.ui.sessionTooltip], [env.ui.weeklyGroup, env.ui.weeklyTooltip]]) {
+		assert.equal(group.getAttribute('role'), 'button');
+		assert.equal(group.getAttribute('tabindex'), '0');
+		assert.ok(tooltip.id, 'the tooltip has an id');
+		assert.equal(group.getAttribute('aria-describedby'), tooltip.id);
+	}
+	assert.equal(env.ui.tokenDisplay.getAttribute('aria-describedby'), env.ui.tokenTooltip.id);
+	const press = async (key) => {
+		let prevented = false;
+		for (const fn of env.ui.sessionGroup.listeners.keydown) await fn({ key, preventDefault: () => { prevented = true; } });
+		return prevented;
+	};
+	assert.equal(await press('Enter'), true);
+	assert.equal(env.refreshes.length, 1);
+	assert.equal(await press(' '), true);
+	assert.equal(env.refreshes.length, 2);
+	assert.equal(await press('a'), false);
+	assert.equal(env.refreshes.length, 2);
+});
+
+test('U62 tooltips appear on keyboard focus and hide on blur (#6)', () => {
+	const env = createUiEnv();
+	for (const fn of env.ui.weeklyGroup.listeners.focus) fn({});
+	assert.equal(env.ui.weeklyTooltip.style.visibility, 'visible');
+	for (const fn of env.ui.weeklyGroup.listeners.blur) fn({});
+	assert.equal(env.ui.weeklyTooltip.style.visibility, 'hidden');
+});

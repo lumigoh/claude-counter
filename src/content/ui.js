@@ -45,11 +45,16 @@
 		return `${days}d ${remHours}h`;
 	}
 
+	let tooltipCount = 0;
+
 	function setupTooltip(element, tooltip, { topOffset = 10 } = {}) {
 		if (!element || !tooltip) return;
 		if (element.hasAttribute('data-tooltip-setup')) return;
 		element.setAttribute('data-tooltip-setup', 'true');
 		element.classList.add('cc-tooltipTrigger');
+		// Screen readers announce the tooltip as the trigger's description (#6).
+		if (!tooltip.id) tooltip.id = `cc-tooltip-${++tooltipCount}`;
+		element.setAttribute('aria-describedby', tooltip.id);
 
 		let pressTimer;
 		let hideTimer;
@@ -104,6 +109,10 @@
 		element.addEventListener('pointerleave', (e) => {
 			if (e.pointerType === 'mouse') hide();
 		});
+
+		// Keyboard users get the same tooltip while the trigger has focus.
+		element.addEventListener('focus', show);
+		element.addEventListener('blur', hide);
 	}
 
 	function makeTooltip(text) {
@@ -307,10 +316,17 @@
 			this.quotaGroups.className = 'cc-quotaGroups';
 			this.usageLine.appendChild(this.quotaGroups);
 			const makeGroup = (label) => {
+				// A focusable button: Tab reaches it, Enter/Space refresh, and its accessible name is its
+				// visible text ("Session: 9% · resets in 4h"), so no aria-label overrides it (#6).
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
-				group.setAttribute('role', 'group');
-				group.setAttribute('aria-label', `${label} usage`);
+				group.setAttribute('role', 'button');
+				group.setAttribute('tabindex', '0');
+				group.addEventListener('keydown', (event) => {
+					if (event.key !== 'Enter' && event.key !== ' ') return;
+					event.preventDefault();
+					return this._requestUsageRefresh();
+				});
 				const span = document.createElement('span');
 				span.className = 'cc-usageText';
 				const labelEl = document.createElement('span');
@@ -348,17 +364,20 @@
 
 			this.refreshProgressChrome();
 
-			this.usageLine.addEventListener('click', async () => {
-				if (!this.onUsageRefresh || this.refreshingUsage) return;
-				this.refreshingUsage = true;
-				this.usageLine.classList.add('cc-usageRow--dim');
-				try {
-					await this.onUsageRefresh();
-				} finally {
-					this.usageLine.classList.remove('cc-usageRow--dim');
-					this.refreshingUsage = false;
-				}
-			});
+			this.usageLine.addEventListener('click', () => this._requestUsageRefresh());
+		}
+
+		/** Mouse click on the row and Enter/Space on a quota button share one refresh. */
+		async _requestUsageRefresh() {
+			if (!this.onUsageRefresh || this.refreshingUsage) return;
+			this.refreshingUsage = true;
+			this.usageLine.classList.add('cc-usageRow--dim');
+			try {
+				await this.onUsageRefresh();
+			} finally {
+				this.usageLine.classList.remove('cc-usageRow--dim');
+				this.refreshingUsage = false;
+			}
 		}
 
 		setTokenCounter({ enabled, active, totalTokens, status }) {
