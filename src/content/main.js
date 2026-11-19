@@ -315,9 +315,6 @@
 
 	let currentOrgId = null;
 	const orgChangeListeners = new Set();
-	// Time of the last genuine A -> B switch. Unlabelled stream events from streams opened before
-	// it may belong to the previous organisation, so they are dropped (see handleMessageLimit).
-	let lastOrgSwitchMs = -Infinity;
 	let orgRevision = 0;
 	const windowFreshness = {
 		five_hour: { revision: 0, resetMs: null },
@@ -435,7 +432,6 @@
 		} catch {}
 		ui.setOrg(newOrgId);
 		if (switching) {
-			lastOrgSwitchMs = Date.now();
 			usageState = null;
 			lastUsageUpdateMs = 0;
 			lastUsageFetchMs = 0;
@@ -594,18 +590,25 @@
 
 	/**
 	 * Limits from a reply. The bridge labels each stream with the organisation it was opened under
-	 * (`meta.orgId`, null when unknown) and when (`meta.openedAt`). Only the content script knows the
-	 * active organisation, so it decides here:
-	 *   - labelled with another org            -> dropped
-	 *   - unlabelled, opened before a switch   -> dropped (could be the previous org)
-	 *   - otherwise                            -> applied (freshness rules still apply)
+	 * (`meta.orgId`, null when the cookie is unreadable) and when (`meta.openedAt`). Only the content
+	 * script knows the active organisation, so it decides here:
+	 *   - labelled with the active org  -> applied (freshness rules still apply)
+	 *   - labelled with another org     -> dropped
+	 *   - unlabelled                    -> never applied or saved: its owner is unknown, and applying
+	 *                                      it once stored another org's quota under the active one
+	 *                                      (#11). It only prompts an org-scoped /usage poll. Cost:
+	 *                                      without the cookie, bars update by poll after each reply,
+	 *                                      and the free plan (empty /usage) gets no live values.
 	 */
 	function handleMessageLimit(messageLimit, meta) {
+		if (!meta?.orgId) {
+			refreshUsageIfStale(5000);
+			return;
+		}
 		// The cookie may already name the stream's org before the tick notices (start-up, or within
 		// the 1 s after a switch, A8): check it synchronously before dropping a labelled event.
 		if (meta?.orgId && meta.orgId !== currentOrgId) checkTrustedOrgChange();
 		if (meta?.orgId && meta.orgId !== currentOrgId) return;
-		if (!meta?.orgId && Number.isFinite(meta?.openedAt) && meta.openedAt < lastOrgSwitchMs) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
 	}

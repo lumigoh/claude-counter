@@ -87,9 +87,9 @@ test('O04 after a genuine switch, the old org poll and old streams cannot reach 
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.66, 3600], sevenD: null }), { orgId: ORG, openedAt: START });
 	assert.equal(env.lastUsage().five_hour.utilization, 7, 'a stream labelled with the old org is dropped');
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.67, 3600], sevenD: null }), { orgId: null, openedAt: START });
-	assert.equal(env.lastUsage().five_hour.utilization, 7, 'an unlabelled stream opened before the switch is dropped');
+	assert.equal(env.lastUsage().five_hour.utilization, 7, 'an unlabelled stream opened before the switch is not applied');
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.08, 3600], sevenD: null }), { orgId: null, openedAt: env.clock.now });
-	assert.equal(env.lastUsage().five_hour.utilization, 8, 'an unlabelled stream opened after the switch is accepted');
+	assert.equal(env.lastUsage().five_hour.utilization, 7, 'nor one opened after it: unlabelled limits are never applied (#11)');
 });
 
 test('O05 A -> B -> A by genuine switches restores A and accepts A streams again', async () => {
@@ -243,4 +243,101 @@ test('O17 an event labelled with the newly chosen org is applied within the tick
 	await env.clock.flush();
 	assert.equal(env.lastUsage().five_hour.utilization, 33);
 	assert.ok(env.stored(`claude_usage_state:${B}`));
+});
+
+// ---- 2.1.8 post-audit B (#11): unlabelled limits are never applied or saved -----------------------
+
+test('O18 an unlabelled reading is neither shown nor saved under the active org; it only prompts a poll (B1)', async () => {
+	const env = await createMainEnv({ storage: scoped(ORG, 40), cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+	await env.clock.advance(6000);
+	const before = env.calls.usageRequests.length;
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.77, 3600], sevenD: null }), { orgId: null, openedAt: START });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.78, 3600], sevenD: null })); // no meta at all
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	assert.equal(env.stored(`claude_usage_state:${ORG}`).usage.five_hour.utilization, 40, 'not saved under the active org');
+	assert.equal(env.calls.usageRequests.length, before + 1, 'one org-scoped poll instead');
+	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
+	const reloaded = await createMainEnv({ storage: env.storageData, cookie: `lastActiveOrg=${ORG}`, startMs: START + MIN, usage: emptyUsage });
+	assert.equal(reloaded.lastUsage().five_hour.utilization, 40, 'and still not after a reload');
+});
+
+test('O19 an unlabelled reading before the org is known is not saved once it is (B3)', async () => {
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.77, 3600], sevenD: [0.5, 86400] }), { orgId: null, openedAt: START });
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.advance(2000);
+	assert.ok(!env.calls.setUsage.some((u) => u?.five_hour?.utilization === 77), 'never shown');
+	assert.equal(env.stored(`claude_usage_state:${ORG}`), undefined, 'never saved');
+});
+
+test('O20 end to end: after a cookie switch the old org stream is rejected and the new one applied', async () => {
+	const proto = require('./helpers/proto');
+	const { createBridgeEnv, settle, STREAM_URL } = require('./helpers/bridge-harness');
+	const brain = await createMainEnv({ cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+	const streams = [];
+	const bridge = createBridgeEnv({
+		cookie: `lastActiveOrg=${ORG}`,
+		originalFetch: async () => {
+			let controller;
+			streams.push({ push: (b) => controller.enqueue(b) });
+			return new Response(new ReadableStream({ start(c) { controller = c; } }), { headers: { 'content-type': 'application/connect+proto' } });
+		}
+	});
+	let forwarded = 0;
+	const forward = async () => {
+		for (const m of bridge.messages.slice(forwarded)) if (m.cc === 'ClaudeCounter') await brain.emit(m.type, m.payload, m.meta);
+		forwarded = bridge.messages.length;
+		await brain.clock.flush();
+	};
+	const frame = (cursor, pct) => proto.connectFrame(0, proto.limitsPayload({ cursor, windows: [['5h', 1, Math.floor(START / 1000) + 3600, pct]] }));
+	await bridge.fetch(STREAM_URL, { method: 'POST' }); // opened under ORG
+	streams[0].push(frame('2000-1', 0.4)); await settle(); await forward();
+	assert.equal(brain.lastUsage().five_hour.utilization, 40);
+
+	bridge.document.cookie = `lastActiveOrg=${B}`;
+	await switchCookie(brain, B);
+	await bridge.fetch(STREAM_URL, { method: 'POST' }); // opened under B
+	streams[0].push(frame('2000-2', 0.45)); await settle(); await forward();
+	assert.notEqual(brain.lastUsage()?.five_hour?.utilization, 45, 'the old org stream is rejected');
+	streams[1].push(frame('2000-1', 0.05)); await settle(); await forward();
+	assert.equal(brain.lastUsage().five_hour.utilization, 5, 'the new org stream is applied');
+	assert.equal(brain.stored(`claude_usage_state:${ORG}`).usage.five_hour.utilization, 40);
+});
+
+test('O21 a turn end labelled with another org does not recount; the active org and unlabelled ones do (B5)', async () => {
+	const { CONV } = require('./helpers/main-harness');
+	const env = await createMainEnv({ cookie: `lastActiveOrg=${ORG}`, showTokenCounter: true, conversations: { [CONV]: { chat_messages: [{}], fakeTokens: 5 } }, startMs: START, usage: emptyUsage });
+	const count = () => env.calls.conversationRequests.length;
+	let before = count();
+	await env.emit('cc:turn_end', {}, { orgId: B, openedAt: START });
+	await env.clock.advance(15000);
+	assert.equal(count(), before, 'another org');
+	before = count();
+	await env.emit('cc:turn_end', {}, { orgId: ORG, openedAt: START });
+	await env.clock.advance(1300);
+	assert.equal(count(), before + 1, 'the active org');
+	before = count();
+	await env.clock.advance(15000);
+	before = count();
+	await env.emit('cc:turn_end', {}, { orgId: null, openedAt: START });
+	await env.clock.advance(1300);
+	assert.equal(count(), before + 1, 'unlabelled still recounts (owner decision, #11)');
+});
+
+test('O22 a late poll of the previous org cannot pass as a new window after the new org window expires', async () => {
+	let completeA;
+	const env = await createMainEnv({ cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+	env.answers.usage = (orgId) => (orgId === ORG ? new Promise((resolve) => { completeA = resolve; }) : emptyUsage());
+	const oldPoll = env.calls.uiOpts.onUsageRefresh();
+	await env.clock.flush();
+	await switchCookie(env, B);
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.1, 600], sevenD: null }), { orgId: B, openedAt: env.clock.now });
+	assert.equal(env.lastUsage().five_hour.utilization, 10);
+	await env.clock.advance(11 * MIN); // B's window reaches its reset time
+	completeA({ five_hour: { utilization: 55, resets_at: new Date(env.clock.now + 2 * HOUR).toISOString() } });
+	await oldPoll;
+	await env.clock.flush();
+	assert.notEqual(env.lastUsage()?.five_hour?.utilization, 55, 'the old org reading never reaches the new org');
+	assert.notEqual(env.stored(`claude_usage_state:${B}`)?.usage?.five_hour?.utilization, 55, 'nor its saved snapshot');
 });

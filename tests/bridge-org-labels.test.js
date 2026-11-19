@@ -19,10 +19,11 @@ const B = '99999999-8888-4777-8666-555555555555';
 const quotaFrame = (cursor, pct) => proto.connectFrame(0, proto.limitsPayload({ cursor, windows: [['5h', 1, 1791749400, pct]] }));
 const limitMessages = (env) => env.messages.filter((m) => m.type === 'cc:message_limit');
 
-function streamingEnv(cookie) {
+function streamingEnv(cookie, nowMs) {
 	const streams = [];
 	const env = createBridgeEnv({
 		cookie,
+		nowMs,
 		originalFetch: async (url) => {
 			if (!String(url).includes('StreamTimeline')) return new Response('{}');
 			let controller;
@@ -58,13 +59,13 @@ test('S02 A -> B -> A: the stream opened under A keeps its A label and keeps del
 });
 
 test('S03 every stream message carries the time its stream was opened', async () => {
-	const { env, streams } = streamingEnv('');
-	const before = Date.now();
+	const opened = 1791743968000;
+	const { env, streams } = streamingEnv('', opened); // pinned clock: the exact open time is known
 	await env.fetch(STREAM_URL, { method: 'POST' });
 	streams[0].push(quotaFrame('2000-1', 0.4)); await settle();
 	const [message] = limitMessages(env);
 	assert.equal(message.meta.orgId, null, 'no cookie: the stream is honestly unlabelled');
-	assert.ok(message.meta.openedAt >= before && message.meta.openedAt <= Date.now());
+	assert.equal(message.meta.openedAt, opened);
 });
 
 test('S04 a legacy completion stream is labelled with the organisation in its own URL', async () => {
@@ -73,4 +74,30 @@ test('S04 a legacy completion stream is labelled with the organisation in its ow
 	await readAll(await env.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' }));
 	await settle();
 	assert.equal(limitMessages(env)[0].meta.orgId, B);
+});
+
+test('S05 unlabelled streams keep separate cursors: a late frame of one cannot hide another (B4)', async () => {
+	const { env, streams } = streamingEnv('');
+	await env.fetch(STREAM_URL, { method: 'POST' }); // org A's tab, cookie unreadable
+	await env.fetch(STREAM_URL, { method: 'POST' }); // org B's stream
+	streams[0].push(quotaFrame('3000-1', 0.4)); await settle();
+	streams[1].push(quotaFrame('2000-1', 0.1)); await settle();
+	assert.deepEqual(limitMessages(env).map((m) => m.payload.windows['5h'].utilization), [0.4, 0.1]);
+	streams[0].push(quotaFrame('2500-1', 0.39)); await settle();
+	assert.equal(limitMessages(env).length, 2, 'within one stream the watermark still holds');
+});
+
+test('S06 turn ends carry their stream label, on Connect and legacy streams (B5)', async () => {
+	const opened = 1791743968000;
+	const { env, streams } = streamingEnv(`lastActiveOrg=${ORG}`, opened);
+	await env.fetch(STREAM_URL, { method: 'POST' });
+	streams[0].push(proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened + 1000}-0`, windows: [['5h', 1, 1791749400, 0.4]] }))); await settle();
+	const ends = env.messages.filter((m) => m.type === 'cc:turn_end');
+	assert.deepEqual(ends.map((m) => m.meta), [{ orgId: ORG, openedAt: opened }]);
+
+	const sse = `data: ${JSON.stringify({ type: 'message_limit', windows: { '5h': { utilization: 0.3, resets_at: 1791749400 } } })}\n\n`;
+	const legacy = createBridgeEnv({ cookie: `lastActiveOrg=${ORG}`, nowMs: opened, originalFetch: async () => streamResponse([Buffer.from(sse)], { contentType: 'text/event-stream' }) });
+	await readAll(await legacy.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' }));
+	await settle();
+	assert.deepEqual(legacy.messages.filter((m) => m.type === 'cc:turn_end').map((m) => m.meta), [{ orgId: B, openedAt: opened }]);
 });

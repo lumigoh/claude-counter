@@ -9,6 +9,8 @@ const START = Date.UTC(2026, 9, 14, 12, 0, 0);
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
 const orgStored = { claude_last_org_id: ORG };
+// The label the bridge puts on a stream of the active org. Unlabelled events are never applied (#11).
+const ORG_STREAM = { orgId: ORG, openedAt: START };
 
 const unhandled = [];
 process.on('unhandledRejection', (reason) => unhandled.push(reason));
@@ -101,7 +103,7 @@ test('M02d without a known organisation nothing can be asked, and it is retried 
 
 test('M03 limits from a reply: bars get the values, they are saved with the organisation, /usage is not needed', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: [0.1, 86400] }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: [0.1, 86400] }), ORG_STREAM);
 	await env.clock.flush();
 
 	const u = env.lastUsage();
@@ -157,7 +159,7 @@ test('M04e the organisation cookie still works when it is readable', async () =>
 
 test('M05 a window that ends shows 0% (expired), the other one stays, the old value does not come back', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.76, 10], sevenD: [0.25, 86400] }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.76, 10], sevenD: [0.25, 86400] }), ORG_STREAM);
 	await env.clock.flush();
 	assert.equal(Math.round(env.lastUsage().five_hour.utilization), 76);
 
@@ -175,11 +177,11 @@ test('M05 a window that ends shows 0% (expired), the other one stays, the old va
 
 test('M05b both windows can end, and a new reply starts a fresh window', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.5, 5], sevenD: [0.5, 8] }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.5, 5], sevenD: [0.5, 8] }), ORG_STREAM);
 	await env.clock.advance(10000);
 	assert.deepEqual(env.lastUsage(), { five_hour: { expired: true }, seven_day: { expired: true } });
 
-	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.02, 5 * 3600], sevenD: [0.3, 7 * 86400] }));
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.02, 5 * 3600], sevenD: [0.3, 7 * 86400] }), ORG_STREAM);
 	const u = env.lastUsage();
 	assert.equal(Math.round(u.five_hour.utilization), 2);
 	assert.equal(Math.round(u.seven_day.utilization), 30);
@@ -235,7 +237,7 @@ test('M08 a paid plan: /usage values are used, a missing window keeps the known 
 		usage: async () => ({ five_hour: { utilization: 41, resets_at: new Date(START + HOUR).toISOString() }, seven_day: null })
 	});
 	assert.equal(env.lastUsage().five_hour.utilization, 41);
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: null, sevenD: [0.5, 86400] }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: null, sevenD: [0.5, 86400] }), ORG_STREAM);
 	assert.equal(env.lastUsage().five_hour.utilization, 41, 'a limits event with only one window keeps the other');
 	assert.equal(Math.round(env.lastUsage().seven_day.utilization), 50);
 });
@@ -243,8 +245,8 @@ test('M08 a paid plan: /usage values are used, a missing window keeps the known 
 test('M09 a limits event without windows changes nothing', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
 	const before = env.calls.setUsage.length;
-	await env.emit('cc:message_limit', { windows: {} });
-	await env.emit('cc:message_limit', null);
+	await env.emit('cc:message_limit', { windows: {} }, ORG_STREAM);
+	await env.emit('cc:message_limit', null, ORG_STREAM);
 	assert.equal(env.calls.setUsage.length, before);
 });
 
@@ -280,7 +282,7 @@ test('M17b a snapshot of a different account is not shown', async () => {
 
 test('M18 windows the page does not know are filled in from the snapshot, known ones are kept', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: null }), ORG_STREAM);
 	assert.equal(env.lastUsage().five_hour.utilization, 20);
 	assert.equal(env.lastUsage().seven_day, null);
 	await env.clock.flush(); // let the live reading's own save finish before planting the snapshot
@@ -294,7 +296,7 @@ test('M18 windows the page does not know are filled in from the snapshot, known 
 
 test('M18b the restore retry stops after two minutes', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.2, 3600], sevenD: null }), ORG_STREAM);
 	await env.clock.advance(3 * MIN);
 	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, ...snapshot({ orgId: ORG }) } });
 	await env.clock.flush();
@@ -304,7 +306,7 @@ test('M18b the restore retry stops after two minutes', async () => {
 
 test('M19 each organisation persists only its own windows, including partial updates', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }), ORG_STREAM);
 	await env.clock.flush();
 	await switchOrg(env, OTHER_ORG);
 	assert.equal(env.lastUsage(), null, 'old quota is removed immediately');
@@ -491,7 +493,7 @@ async function pendingUsage(env) {
 test('F01 a late poll cannot lower a newer live reading, even within the same millisecond', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
 	const poll = await pendingUsage(env);
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }), ORG_STREAM);
 	poll.complete({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() }, seven_day: { utilization: 12, resets_at: new Date(START + 24 * HOUR).toISOString() } });
 	await poll.done;
 	assert.equal(env.lastUsage().five_hour.utilization, 40);
@@ -502,7 +504,7 @@ test('F01 a late poll cannot lower a newer live reading, even within the same mi
 
 test('F02 a fresh poll can apply a real downward correction, including a revised future reset time', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 7200], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 7200], sevenD: null }), ORG_STREAM);
 	env.answers.usage = async () => ({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } });
 	await env.calls.uiOpts.onUsageRefresh();
 	assert.equal(env.lastUsage().five_hour.utilization, 39, 'there is no blanket maximum clamp');
@@ -511,7 +513,7 @@ test('F02 a fresh poll can apply a real downward correction, including a revised
 
 test('F03 a window that ended while a poll was pending can accept a genuinely new window', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, 1], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, 1], sevenD: null }), ORG_STREAM);
 	const poll = await pendingUsage(env);
 	await env.clock.advance(2000);
 	assert.equal(env.lastUsage().five_hour.expired, true);
@@ -522,7 +524,7 @@ test('F03 a window that ended while a poll was pending can accept a genuinely ne
 
 test('F04 an old-window poll arriving after expiry keeps the expired state and retries within a minute', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, 1], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, 1], sevenD: null }), ORG_STREAM);
 	const poll = await pendingUsage(env);
 	await env.clock.advance(2000);
 	poll.complete({ five_hour: { utilization: 90, resets_at: new Date(START + 1000).toISOString() } });
@@ -537,14 +539,14 @@ test('F04 an old-window poll arriving after expiry keeps the expired state and r
 
 test('F05 stale events for a retired window cannot erase a live new window', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.02, 3600], sevenD: null }));
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, -1], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.02, 3600], sevenD: null }), ORG_STREAM);
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.9, -1], sevenD: null }), ORG_STREAM);
 	assert.equal(env.lastUsage().five_hour.utilization, 2);
 });
 
 test('F06 old organisation polls and labelled stream events are ignored after switching', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }), ORG_STREAM);
 	const poll = await pendingUsage(env);
 	await switchOrg(env, OTHER_ORG);
 	poll.complete({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } });
@@ -561,7 +563,7 @@ test('F06 old organisation polls and labelled stream events are ignored after sw
 
 test('F07 precision differences in reset timestamps do not reject a live update for the same window', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => ({ five_hour: { utilization: 40, resets_at: new Date(START + HOUR + 500).toISOString() } }) });
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.41, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.41, 3600], sevenD: null }), ORG_STREAM);
 	assert.equal(env.lastUsage().five_hour.utilization, 41);
 });
 
@@ -572,7 +574,7 @@ test('F08 direct-fetch fallback retains the original poll freshness boundary', a
 	env.context.fetch = async () => new Promise((resolve) => { complete = resolve; });
 	const done = env.calls.uiOpts.onUsageRefresh();
 	await env.clock.flush();
-	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }));
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.4, 3600], sevenD: null }), ORG_STREAM);
 	complete({ ok: true, json: async () => ({ five_hour: { utilization: 39, resets_at: new Date(START + HOUR).toISOString() } }) });
 	await done;
 	assert.equal(env.lastUsage().five_hour.utilization, 40);

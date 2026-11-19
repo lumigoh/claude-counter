@@ -192,10 +192,12 @@ test('T10 repeated limits events: delivered each time, identical values are fine
 });
 
 test('T10b the same event sent again (stream reopened) is not a new reply, a new event with identical limits is', async () => {
-	// same event twice in one stream, and again in a second stream of the same page
+	// same event twice in one stream, and again in a second stream of the same page. Cross-stream
+	// replay detection needs the org label (cookie); unlabelled streams keep separate state (#11).
 	let response;
 	const env = createBridgeEnv({
 		nowMs: RECORDED_NOW,
+		cookie: 'lastActiveOrg=fda3f0e1-4fb4-4c97-97f9-c2274f34ec6d',
 		originalFetch: async () => {
 			response = streamResponse([frame('limits_5h_first'), frame('limits_5h_first')]);
 			return response;
@@ -450,13 +452,19 @@ test('F10 stream freshness is independent for session, weekly, and reset windows
 	assert.equal(limits(env)[2].windows['5h'].utilization, 0.01, 'a different reset window has its own watermark');
 });
 
-test('F11 an unknown organisation becoming known retains its stream watermark', async () => {
-	const frames = [quotaFrame('2000-1', [['5h', 1, 1791749400, 0.4]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39]])];
-	const env = createBridgeEnv({ originalFetch: async (url) => String(url).includes('StreamTimeline') ? streamResponse([frames.shift()]) : new Response('{}') });
+test('F11 a stream reopened under the same org keeps its watermark; another org does not inherit it', async () => {
+	// Rewritten for 2.1.8 post-audit (#13): the old version used IDs that fail isPlausibleOrgId and
+	// passed even with one global cursor key.
+	const A = 'aaaaaaaa-1111-4111-8111-111111111111';
+	const Borg = 'bbbbbbbb-2222-4222-8222-222222222222';
+	const frames = [quotaFrame('2000-1', [['5h', 1, 1791749400, 0.4]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.05]])];
+	const env = createBridgeEnv({ cookie: `lastActiveOrg=${A}`, originalFetch: async () => streamResponse([frames.shift()]) });
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
-	await env.fetch('https://claude.ai/api/organizations/org-a/usage');
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
-	assert.equal(limits(env).length, 1);
+	assert.equal(limits(env).length, 1, 'an older cursor in a reopened stream of the same org is a replay');
+	env.document.cookie = `lastActiveOrg=${Borg}`;
+	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
+	assert.equal(limits(env).length, 2, 'the same cursor value in another org is new');
 });
 
 test('F12 organisations keep separate cursors; an old stream keeps its own label for the content script to judge', async () => {
