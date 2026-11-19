@@ -18,6 +18,7 @@ test('I01 only plausible IDs after /api/organizations/ are reported as candidate
 	for (const url of [
 		'https://claude.ai/api/organizations/discoverable',
 		'https://claude.ai/api/organizations/abc/x',
+		'https://claude.ai/api/organizations/ab12/x', // has a digit but is too short (#13)
 		'https://claude.ai/api/organizations/%2e%2e/usage',
 		`https://claude.ai/api/organizations/${'1'.repeat(200)}/usage`,
 		`https://claude.ai/api/organizations/${ORG}/usage`,
