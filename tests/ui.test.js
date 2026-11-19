@@ -271,6 +271,11 @@ test('U58 a burst of page mutations costs one composer scan, after a short pause
 	assert.equal(scans, 0, 'no layout reads inside the observer callback');
 	await env.clock.advance(150);
 	assert.equal(scans, 1, 'one scan for the whole burst');
+
+	// A batch mixing our own node with a page node is page work and must be checked (#13).
+	for (const observer of env.dom.observers) observer.cb([{ type: 'attributes', target: env.ui.sessionBarFill }, { type: 'childList', target: unrelated }]);
+	await env.clock.advance(150);
+	assert.equal(scans, 2);
 });
 
 test('U59 mutations of the extension\'s own nodes schedule nothing (#3)', async () => {
@@ -313,25 +318,84 @@ test('U61 Session and Weekly are keyboard buttons that refresh and describe them
 		assert.equal(group.getAttribute('aria-describedby'), tooltip.id);
 	}
 	assert.equal(env.ui.tokenDisplay.getAttribute('aria-describedby'), env.ui.tokenTooltip.id);
-	const press = async (key) => {
+	const press = async (group, key, extra = {}) => {
 		let prevented = false;
-		for (const fn of env.ui.sessionGroup.listeners.keydown) await fn({ key, preventDefault: () => { prevented = true; } });
+		for (const fn of group.listeners.keydown) await fn({ key, preventDefault: () => { prevented = true; }, ...extra });
 		return prevented;
 	};
-	assert.equal(await press('Enter'), true);
-	assert.equal(env.refreshes.length, 1);
-	assert.equal(await press(' '), true);
-	assert.equal(env.refreshes.length, 2);
-	assert.equal(await press('a'), false);
-	assert.equal(env.refreshes.length, 2);
+	for (const group of [env.ui.sessionGroup, env.ui.weeklyGroup]) {
+		const before = env.refreshes.length;
+		assert.equal(await press(group, 'Enter'), true);
+		assert.equal(await press(group, ' '), true);
+		assert.equal(env.refreshes.length, before + 2);
+		assert.equal(await press(group, 'a'), false);
+		// Held keys and shortcuts belong to the browser or page, not to a refresh (C3, #12).
+		for (const extra of [{ repeat: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }]) {
+			assert.equal(await press(group, 'Enter', extra), false, JSON.stringify(extra));
+		}
+		assert.equal(env.refreshes.length, before + 2);
+	}
 });
 
-test('U62 tooltips appear on keyboard focus and hide on blur (#6)', () => {
+test('U62 tooltips appear on keyboard focus and hide on blur or Escape (#6, #12)', () => {
 	const env = createUiEnv();
+	for (const group of [env.ui.sessionGroup, env.ui.weeklyGroup]) {
+		const tooltip = group === env.ui.sessionGroup ? env.ui.sessionTooltip : env.ui.weeklyTooltip;
+		group.matches = (selector) => selector === ':focus-visible'; // keyboard focus
+		for (const fn of group.listeners.focus) fn({});
+		assert.equal(tooltip.style.visibility, 'visible');
+		for (const fn of group.listeners.blur) fn({});
+		assert.equal(tooltip.style.visibility, 'hidden');
+		for (const fn of group.listeners.focus) fn({});
+		env.fireWindow('keydown', { key: 'Escape' });
+		assert.equal(tooltip.style.visibility, 'hidden', 'Escape dismisses it');
+	}
+});
+
+test('U67 a touch tap that focuses a quota button does not pin its tooltip open (C1, #12)', () => {
+	const env = createUiEnv();
+	env.ui.weeklyGroup.matches = () => false; // focus without :focus-visible, as after a tap
 	for (const fn of env.ui.weeklyGroup.listeners.focus) fn({});
-	assert.equal(env.ui.weeklyTooltip.style.visibility, 'visible');
-	for (const fn of env.ui.weeklyGroup.listeners.blur) fn({});
-	assert.equal(env.ui.weeklyTooltip.style.visibility, 'hidden');
+	assert.notEqual(env.ui.weeklyTooltip.style.visibility, 'visible');
+});
+
+test('U68 a pending history read for an org is ignored once a newer update for that org ran (C2, #12)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.storageData[key] = { version: 2, resets_at, history: [10] };
+	const reads = [];
+	const get = env.chrome.storage.local.get;
+	env.chrome.storage.local.get = (keys, cb) => reads.push(() => get(keys, cb));
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } }); // read 1, held
+	env.ui.setOrg('org-b-0002');
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at } }); // read 2, held
+	reads[1]();
+	await env.clock.flush(); // storage answers asynchronously
+	env.ui.setUsage({ five_hour: { utilization: 50, resets_at } });
+	reads[0](); // the stale read finishes last
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 45, 50]);
+	assert.match(env.ui.sessionTooltip.textContent, /10% → 45% → 50%/);
+});
+
+test('U66 the fade route table (C4, #12)', () => {
+	const { isConversationPage } = createUiEnv().CC.ui;
+	const cases = {
+		'/chat/d017d8c7': true,
+		'/project/p1/chat/d017d8c7': true, // nested chat routes matched in 2.1.7 and still do
+		'/code/session_01PWd9m9bo3k1fLhqDAJHu8w': true,
+		'/chat/': false,
+		'/code': false,
+		'/code/': false,
+		'/code/new': false,
+		'/new': false,
+		'/': false,
+		'/projects': false
+	};
+	for (const [path, expected] of Object.entries(cases)) assert.equal(isConversationPage(path), expected, path);
 });
 
 test('U63 Spanish pages get whole tooltips and token texts in Spanish, not just the labels (#6)', async () => {

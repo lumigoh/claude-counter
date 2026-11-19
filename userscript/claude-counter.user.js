@@ -1306,9 +1306,12 @@ function start() {
 	 * the soft fade above them is useful (#7). Chat conversations live at /chat/<id>, Claude Code
 	 * sessions at /code/<id> (e.g. /code/session_01...). Landing pages with no transcript (/, /new,
 	 * /code, /code/new, projects) are excluded so the fade never tints an empty screen.
+	 * The chat match is unanchored, as in 2.1.7, so nested routes such as /project/<p>/chat/<id> keep
+	 * the fade (#12). Real routes beyond /chat/<id> and /code/session_<id> are unverified.
 	 */
 	function isConversationPage(pathname) {
-		return /^\/(?:chat|code)\/(?!new(?:[/?#]|$))[^/?#]+/.test(pathname || '');
+		const path = pathname || '';
+		return /\/chat\/[^/?#]+/.test(path) || /^\/code\/(?!new(?:[/?#]|$))[^/?#]+/.test(path);
 	}
 
 	function formatResetCountdown(timestampMs) {
@@ -1400,8 +1403,14 @@ function start() {
 			if (e.pointerType === 'mouse') hide();
 		});
 
-		// Keyboard users get the same tooltip while the trigger has focus.
-		element.addEventListener('focus', show);
+		// Keyboard users get the same tooltip while the trigger has focus. A touch tap also focuses the
+		// trigger, but then the long-press path (with its 3 s auto-hide) owns the tooltip, so only
+		// :focus-visible focus shows it here (#12). Browsers without :focus-visible still show it.
+		element.addEventListener('focus', () => {
+			let keyboard = true;
+			try { keyboard = element.matches(':focus-visible'); } catch {}
+			if (keyboard) show();
+		});
 		element.addEventListener('blur', hide);
 	}
 
@@ -1612,6 +1621,8 @@ function start() {
 				group.setAttribute('tabindex', '0');
 				group.addEventListener('keydown', (event) => {
 					if (event.key !== 'Enter' && event.key !== ' ') return;
+					// Held keys and shortcuts (Ctrl/Cmd/Alt/Shift+Enter) are not a refresh request (#12).
+					if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
 					event.preventDefault();
 					return this._requestUsageRefresh();
 				});
@@ -1795,9 +1806,11 @@ function start() {
 			}
 
 			const key = this._historyKey();
-			const orgAtStart = this.orgId;
+			// Every call gets a sequence number; a storage read that finishes after a newer call (for
+			// any org, including A -> B -> A) is stale and ignored (#12).
+			const seq = (this._historySeq = (this._historySeq || 0) + 1);
 			const processHistory = (storedResetsAt, storedHistory) => {
-				if (this.orgId !== orgAtStart) return; // the org changed while storage was being read
+				if (seq !== this._historySeq) return;
 				let history = [];
 				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
 					history = [...storedHistory];
