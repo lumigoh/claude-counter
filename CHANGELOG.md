@@ -61,8 +61,30 @@ After a primary audit and an independent review of this release (#10–#13), cro
   - A switch poll skipped by the in-flight flag recovers on the next tick.
   - Both replay-heuristic edges.
 
+### Targeted-review fixes
+After an independent review of the post-audit changes (#14–#17), each fix aimed at the underlying mechanism, with a failing test first:
+- **Session history (#14).** Loading is now explicit per org and window. A late read for one org can no longer be appended to, and saved under, another org's history. Readings that arrive while the saved history loads are queued instead of overwriting it.
+- **Held Space (#14).** Holding Space on a quota button no longer scrolls the page. It refreshes once.
+- **Start-up (#15).**
+  - Start-up never blocks on `/api/organizations`: the list gets 2 s, then the remembered org is used and a late `active` answer corrects it.
+  - A cookie that appears while waiting always wins.
+  - A candidate seen while a re-check is in flight is re-checked later.
+- **Snapshots (#15).**
+  - A restored snapshot no longer counts as fresh. Each page load polls once to confirm it.
+  - Start-up restores are shared, so the poll never lands before the snapshot shows.
+- **No-cookie replies (#16).**
+  - Each unlabelled reply gets a coalesced poll that starts after it. Previously, a reply within 5 s of a poll got none.
+  - A labelled turn end before the first org is accepted is no longer dropped.
+  - Unlabelled streams keep their replay state in their own bounded store, so they can't evict a labelled org's cursors.
+- **Tests (#17).**
+  - S03/S06 use a mutable clock.
+  - O12 is split per guard half.
+  - S05 covers repeated event IDs.
+  - F06/O04 now state what they cover.
+
 ### Validation
-- 170 automated tests pass (151 before the post-audit fixes).
+- 183 automated tests pass (170 before the targeted-review fixes, 151 before the post-audit fixes).
+- Earlier post-audit validation: 170 automated tests passed.
 - Earlier 2.1.8 validation: 151 automated tests passed. New tests cover:
   - incidental organisation requests, genuine switches, A→B→A, and stale polls and streams
   - observer coalescing
@@ -71,7 +93,7 @@ After a primary audit and an independent review of this release (#10–#13), cro
   - per-org history, keyboard/ARIA and Spanish
   - the AMD tokenizer
   - fade routes
-- 28 browser checks pass in Chromium (re-run after the post-audit fixes), for both the unpacked extension and the userscript, against a simulated claude.ai page:
+- 28 browser checks pass in Chromium (re-run after the post-audit and targeted-review fixes), for both the unpacked extension and the userscript, against a simulated claude.ai page:
   - placement and late composer
   - an incidental request for another org, and a cookie switch
   - keyboard refresh and tooltips
