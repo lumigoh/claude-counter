@@ -140,3 +140,107 @@ test('O09 a labelled reply that arrives before start-up resolved the org is not 
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.3, 3600], sevenD: null }), { orgId: ORG, openedAt: START });
 	assert.equal(env.lastUsage().five_hour.utilization, 30);
 });
+
+// ---- 2.1.8 post-audit A (#10): one validated source chain, deduplicated and race-safe ------------
+
+const C = 'cccccccc-3333-4333-8333-333333333333';
+const list = (...orgs) => async () => ({ ok: true, json: async () => orgs });
+/** A fetch whose answers the test hands out one by one; `calls` counts requests. */
+function heldFetch() {
+	const pending = [];
+	const fn = async () => new Promise((resolve) => pending.push(resolve));
+	fn.calls = () => pending.length;
+	fn.answer = (orgs) => pending.shift()({ ok: true, json: async () => orgs });
+	fn.fail = () => pending.shift()({ ok: false });
+	return fn;
+}
+
+test('O10 an invalid remembered org (2.1.7 stored route words) no longer blocks start-up (A1)', async () => {
+	const env = await createMainEnv({ storage: { claude_last_org_id: 'discoverable' }, startMs: START, usage: emptyUsage, fetch: list({ uuid: ORG }, { uuid: B }) });
+	assert.equal(env.calls.usageRequests.length, 0, 'nothing trusted yet: no org, no poll');
+	assert.equal(env.stored('claude_last_org_id'), null, 'the invalid value is dropped');
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.at(-1)?.orgId, ORG, 'the candidate bootstraps');
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+
+	const single = await createMainEnv({ storage: { claude_last_org_id: 'discoverable' }, startMs: START, usage: emptyUsage, fetch: list({ uuid: B }) });
+	assert.equal(single.calls.usageRequests.at(-1)?.orgId, B, 'the sole org bootstraps');
+});
+
+test('O11 an org list that marks one org active beats the remembered org at start-up (A2)', async () => {
+	const env = await createMainEnv({ storage: { claude_last_org_id: B }, startMs: START, usage: emptyUsage, fetch: list({ uuid: B }, { uuid: ORG, active: true }) });
+	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [ORG]);
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+});
+
+test('O12 a re-check answer that arrives after the cookie named another org is discarded (A3)', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
+	fetch.fail(); // start-up list request
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
+	await env.emit('cc:org_detected', { orgId: B }); // starts a re-check
+	assert.equal(fetch.calls(), 1);
+	env.document.cookie = `lastActiveOrg=${C}`;
+	await env.clock.advance(1000);
+	await env.clock.flush();
+	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
+	await env.clock.advance(3000);
+	assert.equal(env.stored('claude_last_org_id'), C);
+	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === B).length, 0, 'the stale answer never became active');
+	assert.equal(env.calls.usageRequests.at(-1).orgId, C);
+});
+
+test('O13 concurrent start-up resolution shares one org list request and uses the first candidate (A4)', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	assert.equal(fetch.calls(), 1, 'start-up asks once');
+	await env.emit('cc:org_detected', { orgId: ORG });
+	for (let i = 0; i < 19; i++) await env.emit('cc:org_detected', { orgId: B });
+	assert.equal(fetch.calls(), 1, 'candidates join the request in flight');
+	fetch.answer([{ uuid: ORG }, { uuid: B }]);
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), ORG, 'the first candidate, not the latest');
+});
+
+test('O14 bootstrapping from a candidate polls usage at once (A5)', async () => {
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.at(-1)?.orgId, ORG);
+});
+
+test('O15 page storage keys are validated separately (A6)', async () => {
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, pageStorage: { lastActiveOrg: 'not an id', currentOrganizationId: ORG } });
+	assert.equal(env.calls.usageRequests.at(-1)?.orgId, ORG);
+});
+
+test('O16 a differing candidate during the re-check cooldown schedules one re-check at expiry (A7)', async () => {
+	let answer = [{ uuid: ORG, active: true }, { uuid: B }];
+	let listRequests = 0;
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch: async () => { listRequests++; return { ok: true, json: async () => answer }; } });
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	const startup = listRequests;
+	await env.emit('cc:org_detected', { orgId: B });
+	await env.clock.flush();
+	assert.equal(listRequests - startup, 1, 'first re-check');
+	answer = [{ uuid: ORG }, { uuid: B, active: true }]; // the user switches org; no cookie
+	await env.clock.advance(MIN);
+	await env.emit('cc:org_detected', { orgId: B });
+	await env.emit('cc:org_detected', { orgId: B });
+	await env.clock.flush();
+	assert.equal(listRequests - startup, 1, 'still cooling down');
+	await env.clock.advance(4 * MIN + 1000);
+	assert.equal(listRequests - startup, 2, 'exactly one re-check at expiry');
+	assert.equal(env.stored('claude_last_org_id'), B);
+});
+
+test('O17 an event labelled with the newly chosen org is applied within the tick lag (A8)', async () => {
+	const env = await createMainEnv({ cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+	env.document.cookie = `lastActiveOrg=${B}`; // no tick yet
+	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.33, 3600], sevenD: null }), { orgId: B, openedAt: START });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 33);
+	assert.ok(env.stored(`claude_usage_state:${B}`));
+});

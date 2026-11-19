@@ -1966,9 +1966,11 @@ function start() {
 	//     the active org by itself, however often it appears. It is only used to bootstrap when
 	//     nothing else is known, and to prompt a (rate-limited) re-check of the trusted sources.
 	//
-	// At start-up, when no trusted source answers, the remembered org (`claude_last_org_id`), the
-	// only org in the list, or the first candidate are used, in that order. Without a cookie, a
-	// later candidate only moves us if a trusted source confirms it; otherwise the current org stays.
+	// Start-up order (post-audit #10): cookie -> page storage -> list `active` -> remembered org
+	// (`claude_last_org_id`) -> the account's only org -> the first candidate. Every source is
+	// validated before it can short-circuit, so a bad value falls through instead of blocking.
+	// Without a cookie, a later candidate only moves us if a trusted source confirms it; otherwise
+	// the current org stays.
 	// ---------------------------------------------------------------------------------------------
 
 	function getOrgIdFromCookie() {
@@ -1986,12 +1988,16 @@ function start() {
 	function readTrustedOrgSync() {
 		const fromCookie = getOrgIdFromCookie();
 		if (CC.isPlausibleOrgId(fromCookie)) return fromCookie;
-		try {
-			const fromPage = localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId');
-			return CC.isPlausibleOrgId(fromPage) ? fromPage : null;
-		} catch {
-			return null;
+		// Each key on its own: an invalid first key must not hide a valid second one (A6).
+		for (const key of ['lastActiveOrg', 'currentOrganizationId']) {
+			try {
+				const fromPage = localStorage.getItem(key);
+				if (CC.isPlausibleOrgId(fromPage)) return fromPage;
+			} catch {
+				return null;
+			}
 		}
+		return null;
 	}
 
 	/** An org list entry's ID. `uuid` is the string used in URLs; a numeric `id` is not an org ID. */
@@ -2031,37 +2037,64 @@ function start() {
 		});
 	}
 
-	let lastCandidateOrgId = null;
+	let firstCandidateOrgId = null;
+	let bootstrapPromise = null;
 
-	/** Resolves the active organisation, bootstrapping it on first use. */
-	async function getOrgId() {
-		if (currentOrgId) return currentOrgId;
+	/**
+	 * Resolves the active organisation, bootstrapping it on first use. Concurrent callers share one
+	 * bootstrap, so one org list request at most (A4).
+	 */
+	function getOrgId() {
+		if (currentOrgId) return Promise.resolve(currentOrgId);
+		if (!bootstrapPromise) {
+			bootstrapPromise = bootstrapActiveOrg().finally(() => { bootstrapPromise = null; });
+		}
+		return bootstrapPromise;
+	}
 
+	async function bootstrapActiveOrg() {
 		const trusted = readTrustedOrgSync();
 		if (trusted) {
 			acceptActiveOrg(trusted);
 			return currentOrgId;
 		}
 
-		const remembered = await readRememberedOrg();
+		const list = await readOrgList();
 		if (currentOrgId) return currentOrgId; // resolved by someone else while we waited
-		if (remembered) {
-			acceptActiveOrg(remembered);
+		if (list?.active) {
+			acceptActiveOrg(list.active); // trusted, so it beats the remembered org (A2)
 			return currentOrgId;
 		}
 
-		const list = await readOrgList();
+		const remembered = await readRememberedOrg();
 		if (currentOrgId) return currentOrgId;
-		const fromList = list?.active || list?.single || lastCandidateOrgId;
-		if (fromList) acceptActiveOrg(fromList);
+		if (CC.isPlausibleOrgId(remembered)) {
+			acceptActiveOrg(remembered);
+			return currentOrgId;
+		}
+		// 2.1.7 remembered route words such as "discoverable". Skip and forget them (A1). The
+		// userscript storage adapter has no remove(), so overwrite with null.
+		if (remembered) forgetRememberedOrg();
+
+		const fallback = list?.single || firstCandidateOrgId;
+		if (fallback) acceptActiveOrg(fallback);
 		return currentOrgId;
+	}
+
+	function forgetRememberedOrg() {
+		try {
+			if (typeof chrome !== 'undefined' && chrome.storage?.local) chrome.storage.local.set({ claude_last_org_id: null });
+		} catch {}
 	}
 
 	// Without a cookie, a candidate that differs from the active org asks the org list again, at most
 	// once per ORG_RECHECK_MS, and switches only if the list explicitly marks another org active.
+	// A differing candidate seen during the cooldown is not lost: one re-check runs at expiry (A7).
 	const ORG_RECHECK_MS = 5 * 60 * 1000;
 	let lastOrgRecheckMs = -Infinity;
 	let orgRecheckInFlight = false;
+	let orgRecheckTimer = null;
+	let pendingCandidateOrgId = null;
 
 	async function recheckActiveOrg() {
 		const trusted = readTrustedOrgSync();
@@ -2069,12 +2102,25 @@ function start() {
 			acceptActiveOrg(trusted);
 			return;
 		}
+		if (orgRecheckInFlight) return;
 		const now = Date.now();
-		if (orgRecheckInFlight || now - lastOrgRecheckMs < ORG_RECHECK_MS) return;
+		const waitMs = lastOrgRecheckMs + ORG_RECHECK_MS - now;
+		if (waitMs > 0) {
+			if (!orgRecheckTimer) {
+				orgRecheckTimer = setTimeout(() => {
+					orgRecheckTimer = null;
+					if (pendingCandidateOrgId && pendingCandidateOrgId !== currentOrgId) recheckActiveOrg().catch(() => {});
+				}, waitMs);
+			}
+			return;
+		}
 		lastOrgRecheckMs = now;
 		orgRecheckInFlight = true;
+		const revision = orgRevision;
 		try {
 			const list = await readOrgList();
+			// The answer is stale if a trusted source spoke or the org changed while we waited (A3).
+			if (readTrustedOrgSync() || revision !== orgRevision) return;
 			if (list?.active) acceptActiveOrg(list.active);
 		} finally {
 			orgRecheckInFlight = false;
@@ -2084,12 +2130,15 @@ function start() {
 	/** A request mentioned this org. Bootstrap from it if nothing is known; never switch on it alone. */
 	function handleOrgCandidate(orgId) {
 		if (!CC.isPlausibleOrgId(orgId)) return;
-		lastCandidateOrgId = orgId;
+		if (!firstCandidateOrgId) firstCandidateOrgId = orgId;
 		if (!currentOrgId) {
 			getOrgId()
 				.then(() => { if (usageMissing()) return restoreUsageIfNeeded(); })
+				// Bootstrapping from a candidate polls at once instead of waiting for the retry (A5).
+				.then(() => { if (currentOrgId && usageMissing()) refreshUsageIfStale(0); })
 				.catch(() => {});
 		} else if (orgId !== currentOrgId) {
+			pendingCandidateOrgId = orgId;
 			recheckActiveOrg().catch(() => {});
 		}
 	}
@@ -2496,8 +2545,9 @@ function start() {
 	 *   - otherwise                            -> applied (freshness rules still apply)
 	 */
 	function handleMessageLimit(messageLimit, meta) {
-		// A reply can arrive before start-up resolved the org; the cookie answers synchronously.
-		if (!currentOrgId) checkTrustedOrgChange();
+		// The cookie may already name the stream's org before the tick notices (start-up, or within
+		// the 1 s after a switch, A8): check it synchronously before dropping a labelled event.
+		if (meta?.orgId && meta.orgId !== currentOrgId) checkTrustedOrgChange();
 		if (meta?.orgId && meta.orgId !== currentOrgId) return;
 		if (!meta?.orgId && Number.isFinite(meta?.openedAt) && meta.openedAt < lastOrgSwitchMs) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
