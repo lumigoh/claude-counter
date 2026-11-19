@@ -2,7 +2,21 @@
 
 Session and weekly Claude usage bars, with quota percentages, reset countdowns and readable tooltips. A personal build of [she-llac/claude-counter](https://github.com/she-llac/claude-counter), incorporating #60, #15 and adapted #57 improvements.
 
-## Personal build 2.1.7
+## Personal build 2.1.8
+
+Fixes from an audit of 2.1.7 (tracked in [#1](https://github.com/lumigoh/claude-counter/issues/1)):
+
+- **Organisations.** IDs seen in claude.ai's background requests no longer count as an organisation switch, so bars stop flickering and the live usage feed stays connected. Only a real switch, such as changing organisation in claude.ai, which updates its `lastActiveOrg` cookie, changes what is shown. See [How it works](docs/architecture.md#which-organisation-is-active).
+- **Claude Code.** The soft fade above the bars now also appears on Claude Code session pages (`/code/session_…`).
+- **Keyboard and screen readers.** Tab to Session or Weekly, press Enter or Space to refresh. Tooltips show on focus and are linked to their bars.
+- **Spanish.** Spanish pages get fully translated tooltips.
+- **Smaller fixes.**
+  - Lighter page observation while replies stream.
+  - Recent session readings are saved per organisation.
+  - The optional token counter no longer refetches on same-chat history changes.
+  - The userscript tokenizer loads on pages with an AMD loader.
+
+## Optional token counter
 
 The approximate token counter is available again as an **opt-in code flag**, displayed on the left of the existing quota row. It defaults to disabled. The old cache timer, separate summary and 200k reference bar remain archived on the [archive branch](https://github.com/lumigoh/claude-counter/tree/archive/token-summary-v2.1.3).
 
@@ -42,7 +56,7 @@ The standalone userscript contains the shared usage-tracking code and needs no e
 
 ## Development
 
-Run `npm test` (Node 22+, no dependencies to install). Rebuild the userscript after shared source changes with `npm run build:userscript`; `npm run check:userscript` verifies it matches the sources. See [CHANGELOG.md](CHANGELOG.md) for historical changes.
+Run `npm test` (Node 22+, no dependencies to install). [docs/architecture.md](docs/architecture.md) maps the listener, brain and display, the messages between them, and the organisation rules. Rebuild the userscript after shared source changes with `npm run build:userscript`; `npm run check:userscript` verifies it matches the sources. See [CHANGELOG.md](CHANGELOG.md) for historical changes.
 
 ## Privacy
 

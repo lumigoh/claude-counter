@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Counter
 // @namespace    https://github.com/she-llac/claude-counter
-// @version      2.1.7
+// @version      2.1.8
 // @description  Shows session and weekly usage bars on claude.ai.
 // @homepageURL  https://github.com/lumigoh/claude-counter
 // @downloadURL  https://raw.githubusercontent.com/lumigoh/claude-counter/main/userscript/claude-counter.user.js
