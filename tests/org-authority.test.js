@@ -153,6 +153,8 @@ function heldFetch() {
 	fn.calls = () => pending.length;
 	fn.answer = (orgs) => pending.shift()({ ok: true, json: async () => orgs });
 	fn.fail = () => pending.shift()({ ok: false });
+	/** Answers the i-th pending request (0 = oldest), for out-of-order answers. */
+	fn.answerAt = (i, orgs) => pending.splice(i, 1)[0]({ ok: true, json: async () => orgs });
 	return fn;
 }
 
@@ -358,7 +360,7 @@ test('O22 a late poll of the previous org cannot pass as a new window after the 
 
 // ---- targeted review (#15): bootstrap never blocks on the network; candidates are not lost ------
 
-test('O23 a stalled org list does not block start-up: the remembered org shows after 2 s and a late list can correct it (A2)', async () => {
+test('O23 a stalled org list does not block start-up: the remembered org shows after 2 s; a late list answer is ignored (A2, final round)', async () => {
 	const fetch = heldFetch();
 	const env = await createMainEnv({ storage: { claude_last_org_id: ORG, ...scoped(ORG, 40) }, startMs: START, usage: emptyUsage, fetch });
 	assert.equal(env.calls.usageRequests.length, 0, 'nothing chosen while the list may still answer');
@@ -367,8 +369,9 @@ test('O23 a stalled org list does not block start-up: the remembered org shows a
 	assert.equal(env.calls.usageRequests.at(-1)?.orgId, ORG, 'and is confirmed by a poll');
 	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]); // the list finally answers
 	await env.clock.flush();
-	assert.equal(env.stored('claude_last_org_id'), B, 'its trusted answer corrects the fallback');
-	assert.equal(env.calls.usageRequests.at(-1).orgId, B);
+	// Start-up is over: only the cookie tick or a candidate re-check may switch now (R2).
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === ORG));
 });
 
 test('O24 a cookie that appears while the start-up list is pending beats the list answer (A3)', async () => {
@@ -477,4 +480,128 @@ test('O28 a labelled turn end that arrives before the first org is accepted stil
 	await env.clock.advance(4000); // the org resolves (≤ 2 s), then the turn-end recount runs 1.2 s later
 	assert.ok(env.calls.conversationRequests.length >= 2, `recounted after the turn (${env.calls.conversationRequests.length} requests)`);
 	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 20);
+});
+
+// ---- final round: start-up rules R1–R4 (each test targets one rule, not one reported scenario) ----
+
+test('O31 R2: a late start-up list answer never overrides a re-check that confirmed the fallback', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(2000); // fallback: the remembered org
+	await env.emit('cc:org_detected', { orgId: B }); // starts a re-check (second list request)
+	assert.equal(fetch.calls(), 2);
+	fetch.answerAt(1, [{ uuid: ORG, active: true }, { uuid: B }]); // the newer re-check confirms ORG
+	await env.clock.flush();
+	fetch.answerAt(0, [{ uuid: ORG }, { uuid: B, active: true }]); // the older start-up answer lands last
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === ORG), 'B is never polled');
+});
+
+test('O32 R1: with no fallback and a stalled list, start-up makes one list request, then a candidate decides', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ storage: { ...scoped(ORG, 40) }, startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(12000); // past the 2 s wait and the 10 s restore retry
+	assert.equal(fetch.calls(), 1, 'one org list request');
+	assert.equal(env.calls.usageRequests.length, 0);
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [ORG]);
+	assert.equal(fetch.calls(), 1, 'still one');
+});
+
+test('O33 R1: a slow remembered-org read does not delay an org list that names the active org', async () => {
+	const env = await createMainEnv({
+		storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch: list({ uuid: ORG }, { uuid: B, active: true }),
+		beforeStart: (e) => {
+			const get = e.chrome.storage.local.get;
+			e.chrome.storage.local.get = (keys, cb) => { if (!(Array.isArray(keys) && keys.includes('claude_last_org_id'))) get(keys, cb); };
+		}
+	});
+	await env.clock.advance(100);
+	assert.equal(env.stored('claude_last_org_id'), B);
+	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [B]);
+});
+
+test('O34 R3: an org accepted late reads its snapshot once, and before the start-up poll answers', async () => {
+	const fetch = heldFetch();
+	const reads = [];
+	const env = await createMainEnv({
+		storage: { ...scoped(ORG, 40) }, startMs: START, fetch,
+		usage: async () => ({ five_hour: liveWindow(55, START + HOUR), seven_day: liveWindow(9, START + 24 * HOUR) }),
+		beforeStart: (e) => {
+			const get = e.chrome.storage.local.get;
+			e.chrome.storage.local.get = (keys, cb) => { if ([].concat(keys).includes(`claude_usage_state:${ORG}`)) reads.push(1); get(keys, cb); };
+		}
+	});
+	await env.clock.advance(3000); // stalled list, no fallback
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	const shown = env.calls.setUsage.filter(Boolean).map((u) => u.five_hour?.utilization);
+	assert.equal(shown[0], 40, `the snapshot shows first (${shown})`);
+	assert.equal(shown.at(-1), 55);
+	assert.equal(reads.length, 1, 'one snapshot read');
+	assert.equal(env.calls.usageRequests.length, 1, 'one start-up poll');
+});
+
+test('O35 R4: a live reading of one window before acceptance does not skip the start-up poll', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, fetch, usage: async () => ({ five_hour: liveWindow(31, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) }) });
+	await env.clock.advance(3000); // no org yet
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: null }), { orgId: ORG, openedAt: env.clock.now });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 1, 'confirmed by one poll');
+	assert.equal(env.lastUsage().seven_day.utilization, 12, 'the weekly bar is filled');
+});
+
+test('O33b R1: a slow remembered-org read is bounded by the 2 s wait when the list names no active org', async () => {
+	const env = await createMainEnv({
+		startMs: START, usage: emptyUsage, fetch: list({ uuid: ORG }, { uuid: B }),
+		beforeStart: (e) => {
+			const get = e.chrome.storage.local.get;
+			e.chrome.storage.local.get = (keys, cb) => { if (!(Array.isArray(keys) && keys.includes('claude_last_org_id'))) get(keys, cb); };
+		}
+	});
+	await env.emit('cc:org_detected', { orgId: B });
+	await env.clock.advance(1900);
+	assert.equal(env.calls.usageRequests.length, 0, 'the remembered org may still answer');
+	await env.clock.advance(200);
+	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [B], 'the candidate is used at 2 s');
+});
+
+test('O32b R1: a list that names nothing and no candidate: start-up still makes one list request', async () => {
+	let listRequests = 0;
+	const fetch = async () => { listRequests++; return { ok: true, json: async () => [{ uuid: ORG }, { uuid: B }] }; };
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(12000);
+	assert.equal(listRequests, 1);
+	assert.equal(env.calls.usageRequests.length, 0);
+});
+
+test('O35b R4: live readings of both windows before the start-up check make its poll unnecessary', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, fetch, usage: async () => ({ five_hour: liveWindow(31, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) }) });
+	await env.clock.advance(3000);
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: [0.1, 86400] }), { orgId: ORG, openedAt: env.clock.now });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 0);
+	assert.equal(env.lastUsage().seven_day.utilization, 10);
+});
+
+test('O28b a start-up still waiting for the list resolves when the cookie tick accepts an org (B5, R1)', async () => {
+	let messages = [{}];
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch, showTokenCounter: true, conversations: {} });
+	env.answers.conversation = async () => ({ chat_messages: messages });
+	await env.clock.advance(3000); // past the 2 s wait, nothing to choose: start-up keeps waiting
+	await env.emit('cc:turn_end', {}, { orgId: ORG, openedAt: START }); // waits for the org
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	messages = [{}, {}];
+	await env.clock.advance(4000); // the tick accepts ORG; the waiting turn end recounts
+	assert.equal(env.calls.tokenStates.at(-1)?.totalTokens, 20);
+	assert.equal(fetch.calls(), 1, 'the stalled list is never asked again');
 });
