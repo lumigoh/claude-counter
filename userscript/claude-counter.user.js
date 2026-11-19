@@ -2094,32 +2094,60 @@ function start() {
 		return bootstrapPromise;
 	}
 
-	async function bootstrapActiveOrg() {
+	// How long start-up waits for /api/organizations before using the remembered org (#15).
+	const ORG_LIST_WAIT_MS = 2000;
+	const LIST_TIMED_OUT = Symbol('list timed out');
+
+	/** A trusted source (cookie, page storage) wins at every step of start-up. */
+	function acceptTrustedNow() {
 		const trusted = readTrustedOrgSync();
-		if (trusted) {
-			acceptActiveOrg(trusted);
-			return currentOrgId;
-		}
+		if (trusted) acceptActiveOrg(trusted);
+		return !!trusted;
+	}
 
-		const list = await readOrgList();
+	/**
+	 * Start-up never blocks on the network (#15): the org list and the remembered org are read at
+	 * the same time, and the list gets ORG_LIST_WAIT_MS. Within that time the order is list `active`,
+	 * valid remembered org, sole org, first candidate. If the list is slower, the remembered org (or
+	 * first candidate) is used now and a late `active` answer corrects it as a genuine switch, unless
+	 * a trusted source spoke or the org changed meanwhile. A cookie that appears at any point wins.
+	 */
+	async function bootstrapActiveOrg() {
+		if (acceptTrustedNow()) return currentOrgId;
+
+		const listPromise = readOrgList();
+		const rememberedPromise = readRememberedOrg();
+		let timer;
+		const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(LIST_TIMED_OUT), ORG_LIST_WAIT_MS); });
+		const listOrTimeout = await Promise.race([listPromise, timeout]);
+		clearTimeout(timer);
+		const remembered = await rememberedPromise;
 		if (currentOrgId) return currentOrgId; // resolved by someone else while we waited
-		if (list?.active) {
-			acceptActiveOrg(list.active); // trusted, so it beats the remembered org (A2)
-			return currentOrgId;
-		}
+		if (acceptTrustedNow()) return currentOrgId; // a cookie appeared while we waited (A3)
 
-		const remembered = await readRememberedOrg();
-		if (currentOrgId) return currentOrgId;
-		if (CC.isPlausibleOrgId(remembered)) {
-			acceptActiveOrg(remembered);
-			return currentOrgId;
-		}
+		const rememberedValid = CC.isPlausibleOrgId(remembered) ? remembered : null;
 		// 2.1.7 remembered route words such as "discoverable". Skip and forget them (A1). The
 		// userscript storage adapter has no remove(), so overwrite with null.
-		if (remembered) forgetRememberedOrg();
+		if (remembered && !rememberedValid) forgetRememberedOrg();
 
-		const fallback = list?.single || firstCandidateOrgId;
+		if (listOrTimeout !== LIST_TIMED_OUT) {
+			const list = listOrTimeout;
+			const choice = list?.active || rememberedValid || list?.single || firstCandidateOrgId;
+			if (choice) acceptActiveOrg(choice);
+			return currentOrgId;
+		}
+
+		const fallback = rememberedValid || firstCandidateOrgId;
 		if (fallback) acceptActiveOrg(fallback);
+		const revision = orgRevision;
+		listPromise
+			.then((list) => {
+				if (readTrustedOrgSync()) return; // the tick owns trusted sources
+				if (orgRevision !== revision) return; // something else decided since
+				if (list?.active && list.active !== currentOrgId) acceptActiveOrg(list.active);
+				else if (!currentOrgId && (list?.single || firstCandidateOrgId)) acceptActiveOrg(list?.single || firstCandidateOrgId);
+			})
+			.catch(() => {});
 		return currentOrgId;
 	}
 
@@ -2137,6 +2165,8 @@ function start() {
 	let orgRecheckInFlight = false;
 	let orgRecheckTimer = null;
 	let pendingCandidateOrgId = null;
+	// A differing candidate seen while a re-check is in flight is re-checked afterwards (A7, #15).
+	let recheckAgain = false;
 
 	async function recheckActiveOrg() {
 		const trusted = readTrustedOrgSync();
@@ -2144,7 +2174,10 @@ function start() {
 			acceptActiveOrg(trusted);
 			return;
 		}
-		if (orgRecheckInFlight) return;
+		if (orgRecheckInFlight) {
+			recheckAgain = true;
+			return;
+		}
 		const now = Date.now();
 		const waitMs = lastOrgRecheckMs + ORG_RECHECK_MS - now;
 		if (waitMs > 0) {
@@ -2166,6 +2199,11 @@ function start() {
 			if (list?.active) acceptActiveOrg(list.active);
 		} finally {
 			orgRecheckInFlight = false;
+			if (recheckAgain) {
+				recheckAgain = false;
+				// Within the cooldown this schedules one re-check at expiry.
+				if (pendingCandidateOrgId && pendingCandidateOrgId !== currentOrgId) recheckActiveOrg().catch(() => {});
+			}
 		}
 	}
 
@@ -2174,11 +2212,8 @@ function start() {
 		if (!CC.isPlausibleOrgId(orgId)) return;
 		if (!firstCandidateOrgId) firstCandidateOrgId = orgId;
 		if (!currentOrgId) {
-			getOrgId()
-				.then(() => { if (usageMissing()) return restoreUsageIfNeeded(); })
-				// Bootstrapping from a candidate polls at once instead of waiting for the retry (A5).
-				.then(() => { if (currentOrgId && usageMissing()) refreshUsageIfStale(0); })
-				.catch(() => {});
+			// Acceptance restores the snapshot and polls (see acceptActiveOrg).
+			getOrgId().catch(() => {});
 		} else if (orgId !== currentOrgId) {
 			pendingCandidateOrgId = orgId;
 			recheckActiveOrg().catch(() => {});
@@ -2385,10 +2420,13 @@ function start() {
 		}
 		if (!Object.keys(accepted).length) return false;
 		usageState = { ...previous, ...accepted };
-		lastUsageUpdateMs = now;
+		// A restored snapshot is a display fallback of unknown age, not fresh data (#15).
+		if (source !== 'cache') lastUsageUpdateMs = now;
 		expireWindows(now);
 		if (source === 'cache') {
-			if (USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
+			// An expired snapshot asks for fresh data at once, unless a poll already answered for this
+			// org; its backoff (failure, free plan) stays in force (#15).
+			if (!lastUsageFetchMs && USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
 		} else {
 			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
@@ -2433,6 +2471,14 @@ function start() {
 			Promise.resolve()
 				.then(() => restoreUsageIfNeeded())
 				.then(() => { if (!document.hidden && currentOrgId === newOrgId) return refreshUsage(); })
+				.catch(() => {});
+		} else {
+			// First acceptance, however it happened (cookie, list, remembered, candidate): show the
+			// snapshot, then confirm it with one poll, since its age is unknown (A5, #15). The poll
+			// shares the freshness gate with handleUrlChange's own, so start-up polls once.
+			Promise.resolve()
+				.then(() => restoreUsageIfNeeded())
+				.then(() => { if (!document.hidden && currentOrgId === newOrgId) refreshUsageIfStale(5000); })
 				.catch(() => {});
 		}
 		for (const fn of orgChangeListeners) {
@@ -2479,7 +2525,20 @@ function start() {
 	let lastRestore = { org: null, at: 0 };
 
 	// Restore only this organisation's missing windows, preserving any newer live readings.
-	async function restoreUsageIfNeeded() {
+	// Concurrent callers share the restore in flight, so nobody polls before the snapshot is shown
+	// (start-up runs one from acceptActiveOrg and one from handleUrlChange, #15).
+	// Keyed by org: after a switch, the new org gets its own restore.
+	let restoreInFlight = null;
+	function restoreUsageIfNeeded() {
+		if (!restoreInFlight || restoreInFlight.org !== currentOrgId) {
+			const entry = { org: currentOrgId };
+			entry.promise = restoreUsageNow().finally(() => { if (restoreInFlight === entry) restoreInFlight = null; });
+			restoreInFlight = entry;
+		}
+		return restoreInFlight.promise;
+	}
+
+	async function restoreUsageNow() {
 		if (!usageMissing()) return true;
 		const orgId = await getOrgId();
 		if (!orgId) return false;
