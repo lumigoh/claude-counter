@@ -41,9 +41,10 @@
 	/** Trusted sources that can be read synchronously and cheaply (safe to call every second). */
 	function readTrustedOrgSync() {
 		const fromCookie = getOrgIdFromCookie();
-		if (fromCookie) return fromCookie;
+		if (CC.isPlausibleOrgId(fromCookie)) return fromCookie;
 		try {
-			return localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId') || null;
+			const fromPage = localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId');
+			return CC.isPlausibleOrgId(fromPage) ? fromPage : null;
 		} catch {
 			return null;
 		}
@@ -52,7 +53,7 @@
 	/** An org list entry's ID. `uuid` is the string used in URLs; a numeric `id` is not an org ID. */
 	function orgListId(org) {
 		const id = org?.uuid ?? org?.id;
-		return typeof id === 'string' && id ? id : null;
+		return CC.isPlausibleOrgId(id) ? id : null;
 	}
 
 	/**
@@ -138,7 +139,7 @@
 
 	/** A request mentioned this org. Bootstrap from it if nothing is known; never switch on it alone. */
 	function handleOrgCandidate(orgId) {
-		if (!orgId || typeof orgId !== 'string') return;
+		if (!CC.isPlausibleOrgId(orgId)) return;
 		lastCandidateOrgId = orgId;
 		if (!currentOrgId) {
 			getOrgId()
@@ -371,7 +372,7 @@
 	 * straight away.
 	 */
 	function acceptActiveOrg(newOrgId) {
-		if (!newOrgId || typeof newOrgId !== 'string' || newOrgId === currentOrgId) return;
+		if (!CC.isPlausibleOrgId(newOrgId) || newOrgId === currentOrgId) return;
 		const previous = currentOrgId;
 		const switching = !!previous;
 		currentOrgId = newOrgId;
@@ -486,7 +487,8 @@
 		} catch {
 			// Bridge failed or timed out; try direct fetch fallback
 			try {
-				const res = await fetch(`https://claude.ai/api/organizations/${orgId}/usage`, {
+				// Encoded although accepted IDs are URL-safe: defence in depth (#5).
+				const res = await fetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
 					credentials: 'include'
 				});
 				if (res.ok) {

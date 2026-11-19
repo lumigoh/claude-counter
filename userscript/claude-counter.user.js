@@ -130,7 +130,8 @@ const chrome = (() => {
 	//     time, or null when it is unreadable.
 	function cookieOrgId() {
 		try {
-			return (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+			const id = (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1];
+			return isPlausibleOrgId(id) ? id : null;
 		} catch {
 			return null;
 		}
@@ -139,6 +140,9 @@ const chrome = (() => {
 		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now() };
 	}
 	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
+
+	// Same check as CC.isPlausibleOrgId in src/content/constants.js (#5); keep the two in sync.
+	const isPlausibleOrgId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(id) && /\d/.test(id);
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -168,12 +172,11 @@ const chrome = (() => {
 		}
 
 		// Detect and broadcast active orgId from any Claude API requests
-		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
-		if (orgMatch && orgMatch[1]) {
-			post('cc:org_detected', { orgId: orgMatch[1] });
-		}
+		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/?#]+)/);
+		const requestOrgId = isPlausibleOrgId(orgMatch?.[1]) ? orgMatch[1] : null;
+		if (requestOrgId) post('cc:org_detected', { orgId: requestOrgId });
 
-		const scope = streamScope(orgMatch?.[1] || null);
+		const scope = streamScope(requestOrgId);
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
@@ -642,7 +645,7 @@ const chrome = (() => {
 			if (kind === 'usage') {
 				const orgId = payload?.orgId;
 				if (!orgId) throw new Error('Missing orgId');
-				const res = await originalFetch(`https://claude.ai/api/organizations/${orgId}/usage`, {
+				const res = await originalFetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
 					method: 'GET',
 					credentials: 'include'
 				});
@@ -657,7 +660,7 @@ const chrome = (() => {
 				const conversationId = payload?.conversationId;
 				if (!orgId || !conversationId) throw new Error('Missing orgId/conversationId');
 
-				const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=true&rendering_mode=messages&render_all_tools=true`;
+				const url = `https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/chat_conversations/${encodeURIComponent(conversationId)}?tree=true&rendering_mode=messages&render_all_tools=true`;
 				const res = await originalFetch(url, {
 					method: 'GET',
 					credentials: 'include'
@@ -703,6 +706,14 @@ const chrome = (() => {
 
 
 	CC.CONST = Object.freeze({ CACHE_WINDOW_MS: 5 * 60 * 1000 });
+
+	/**
+	 * Whether a value can be an organisation ID (#5). Deliberately permissive, because the ID format
+	 * is not a documented contract: URL-safe characters, 8-128 long, and at least one digit, which
+	 * rules out route words such as `discoverable`. A copy lives in src/injected/bridge.js, which
+	 * runs in the page world and cannot share this object.
+	 */
+	CC.isPlausibleOrgId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(id) && /\d/.test(id);
 
 	CC.COLORS = Object.freeze({
 		PROGRESS_FILL_DARK: '#2c84db',
@@ -1904,9 +1915,10 @@ function start() {
 	/** Trusted sources that can be read synchronously and cheaply (safe to call every second). */
 	function readTrustedOrgSync() {
 		const fromCookie = getOrgIdFromCookie();
-		if (fromCookie) return fromCookie;
+		if (CC.isPlausibleOrgId(fromCookie)) return fromCookie;
 		try {
-			return localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId') || null;
+			const fromPage = localStorage.getItem('lastActiveOrg') || localStorage.getItem('currentOrganizationId');
+			return CC.isPlausibleOrgId(fromPage) ? fromPage : null;
 		} catch {
 			return null;
 		}
@@ -1915,7 +1927,7 @@ function start() {
 	/** An org list entry's ID. `uuid` is the string used in URLs; a numeric `id` is not an org ID. */
 	function orgListId(org) {
 		const id = org?.uuid ?? org?.id;
-		return typeof id === 'string' && id ? id : null;
+		return CC.isPlausibleOrgId(id) ? id : null;
 	}
 
 	/**
@@ -2001,7 +2013,7 @@ function start() {
 
 	/** A request mentioned this org. Bootstrap from it if nothing is known; never switch on it alone. */
 	function handleOrgCandidate(orgId) {
-		if (!orgId || typeof orgId !== 'string') return;
+		if (!CC.isPlausibleOrgId(orgId)) return;
 		lastCandidateOrgId = orgId;
 		if (!currentOrgId) {
 			getOrgId()
@@ -2234,7 +2246,7 @@ function start() {
 	 * straight away.
 	 */
 	function acceptActiveOrg(newOrgId) {
-		if (!newOrgId || typeof newOrgId !== 'string' || newOrgId === currentOrgId) return;
+		if (!CC.isPlausibleOrgId(newOrgId) || newOrgId === currentOrgId) return;
 		const previous = currentOrgId;
 		const switching = !!previous;
 		currentOrgId = newOrgId;
@@ -2349,7 +2361,8 @@ function start() {
 		} catch {
 			// Bridge failed or timed out; try direct fetch fallback
 			try {
-				const res = await fetch(`https://claude.ai/api/organizations/${orgId}/usage`, {
+				// Encoded although accepted IDs are URL-safe: defence in depth (#5).
+				const res = await fetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
 					credentials: 'include'
 				});
 				if (res.ok) {
