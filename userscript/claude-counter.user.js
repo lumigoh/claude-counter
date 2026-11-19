@@ -2106,9 +2106,11 @@ function start() {
 		return bootstrapPromise;
 	}
 
-	// How long start-up waits for /api/organizations before using the remembered org (#15).
+	// How long start-up waits for its two reads (org list, remembered org) once a fallback exists (#15).
 	const ORG_LIST_WAIT_MS = 2000;
-	const LIST_TIMED_OUT = Symbol('list timed out');
+	const TIMED_OUT = Symbol('timed out');
+	// Wakes a start-up that has nothing to choose yet: a candidate arrived or an org was accepted.
+	let wakeBootstrap = null;
 
 	/** A trusted source (cookie, page storage) wins at every step of start-up. */
 	function acceptTrustedNow() {
@@ -2117,12 +2119,20 @@ function start() {
 		return !!trusted;
 	}
 
+	/** Resolves with the promise's value, or TIMED_OUT once the shared deadline passes. */
+	function byDeadline(promise, deadline) {
+		return Promise.race([promise, deadline]);
+	}
+
 	/**
-	 * Start-up never blocks on the network (#15): the org list and the remembered org are read at
-	 * the same time, and the list gets ORG_LIST_WAIT_MS. Within that time the order is list `active`,
-	 * valid remembered org, sole org, first candidate. If the list is slower, the remembered org (or
-	 * first candidate) is used now and a late `active` answer corrects it as a genuine switch, unless
-	 * a trusted source spoke or the org changed meanwhile. A cookie that appears at any point wins.
+	 * Start-up makes one org-list request and never blocks on the network once it has a fallback
+	 * (final round, rules R1/R2). Both reads share one deadline, ORG_LIST_WAIT_MS after start; a read
+	 * that has not answered by then counts as missing.
+	 *   - list marks one org active  -> accepted at once, without waiting for the remembered org
+	 *   - otherwise                  -> valid remembered org, sole org, first candidate
+	 *   - nothing to choose yet      -> keep waiting for the list, a candidate or an accepted org
+	 * Once something is accepted, start-up is over: a late list answer is ignored. Later switches come
+	 * only from trusted sources (the tick) or a candidate re-check. A cookie wins at every step.
 	 */
 	async function bootstrapActiveOrg() {
 		if (acceptTrustedNow()) return currentOrgId;
@@ -2130,37 +2140,41 @@ function start() {
 		const listPromise = readOrgList();
 		const rememberedPromise = readRememberedOrg();
 		let timer;
-		const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(LIST_TIMED_OUT), ORG_LIST_WAIT_MS); });
-		const listOrTimeout = await Promise.race([listPromise, timeout]);
-		clearTimeout(timer);
-		const remembered = await rememberedPromise;
-		if (currentOrgId) return currentOrgId; // resolved by someone else while we waited
-		if (acceptTrustedNow()) return currentOrgId; // a cookie appeared while we waited (A3)
+		const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), ORG_LIST_WAIT_MS); });
+		try {
+			const list = await byDeadline(listPromise, deadline);
+			if (currentOrgId || acceptTrustedNow()) return currentOrgId; // decided while we waited (A3)
+			if (list !== TIMED_OUT && list?.active) {
+				acceptActiveOrg(list.active);
+				return currentOrgId;
+			}
 
-		const rememberedValid = CC.isPlausibleOrgId(remembered) ? remembered : null;
-		// 2.1.7 remembered route words such as "discoverable". Skip and forget them (A1). The
-		// userscript storage adapter has no remove(), so overwrite with null.
-		if (remembered && !rememberedValid) forgetRememberedOrg();
+			const remembered = await byDeadline(rememberedPromise, deadline);
+			if (currentOrgId || acceptTrustedNow()) return currentOrgId;
+			const rememberedValid = remembered !== TIMED_OUT && CC.isPlausibleOrgId(remembered) ? remembered : null;
+			// 2.1.7 remembered route words such as "discoverable". Skip and forget them (A1). The
+			// userscript storage adapter has no remove(), so overwrite with null.
+			if (remembered && remembered !== TIMED_OUT && !rememberedValid) forgetRememberedOrg();
 
-		if (listOrTimeout !== LIST_TIMED_OUT) {
-			const list = listOrTimeout;
-			const choice = list?.active || rememberedValid || list?.single || firstCandidateOrgId;
-			if (choice) acceptActiveOrg(choice);
+			const listSingle = list !== TIMED_OUT ? list?.single : null;
+			const choice = rememberedValid || listSingle || firstCandidateOrgId;
+			if (choice) {
+				acceptActiveOrg(choice);
+				return currentOrgId;
+			}
+			if (list !== TIMED_OUT) return currentOrgId; // the list answered and names nothing
+
+			// Nothing to show yet: wait for the list, a candidate, or an accepted org (one request, R1).
+			const woken = new Promise((resolve) => { wakeBootstrap = resolve; });
+			const late = await Promise.race([listPromise, woken]);
+			if (currentOrgId || acceptTrustedNow()) return currentOrgId;
+			const lateChoice = late?.active || late?.single || firstCandidateOrgId;
+			if (lateChoice) acceptActiveOrg(lateChoice);
 			return currentOrgId;
+		} finally {
+			clearTimeout(timer);
+			wakeBootstrap = null;
 		}
-
-		const fallback = rememberedValid || firstCandidateOrgId;
-		if (fallback) acceptActiveOrg(fallback);
-		const revision = orgRevision;
-		listPromise
-			.then((list) => {
-				if (readTrustedOrgSync()) return; // the tick owns trusted sources
-				if (orgRevision !== revision) return; // something else decided since
-				if (list?.active && list.active !== currentOrgId) acceptActiveOrg(list.active);
-				else if (!currentOrgId && (list?.single || firstCandidateOrgId)) acceptActiveOrg(list?.single || firstCandidateOrgId);
-			})
-			.catch(() => {});
-		return currentOrgId;
 	}
 
 	function forgetRememberedOrg() {
@@ -2225,6 +2239,7 @@ function start() {
 		if (!firstCandidateOrgId) firstCandidateOrgId = orgId;
 		if (!currentOrgId) {
 			// Acceptance restores the snapshot and polls (see acceptActiveOrg).
+			wakeBootstrap?.();
 			getOrgId().catch(() => {});
 		} else if (orgId !== currentOrgId) {
 			pendingCandidateOrgId = orgId;
@@ -2349,9 +2364,10 @@ function start() {
 	let currentOrgId = null;
 	const orgChangeListeners = new Set();
 	let orgRevision = 0;
+	// `live`: the window holds a reading from a reply or a poll for the active org (not a snapshot).
 	const windowFreshness = {
-		five_hour: { revision: 0, resetMs: null },
-		seven_day: { revision: 0, resetMs: null }
+		five_hour: { revision: 0, resetMs: null, live: false },
+		seven_day: { revision: 0, resetMs: null, live: false }
 	};
 
 	// Usage state: one entry per window. A window is either live ({ utilization, resets_at, ... }),
@@ -2401,6 +2417,7 @@ function start() {
 			if (resetMs !== null && now >= resetMs) {
 				usageState[key] = { expired: true };
 				windowFreshness[key].revision++;
+				windowFreshness[key].live = false;
 				changed = true;
 			}
 		}
@@ -2427,7 +2444,10 @@ function start() {
 			}
 			accepted[key] = value;
 			// Restored snapshots are a display fallback, not evidence that an in-flight poll is stale.
-			if (source !== 'cache') meta.revision++;
+			if (source !== 'cache') {
+				meta.revision++;
+				meta.live = true;
+			}
 			if (resetMs !== null) meta.resetMs = resetMs;
 		}
 		if (!Object.keys(accepted).length) return false;
@@ -2436,9 +2456,9 @@ function start() {
 		if (source !== 'cache') lastUsageUpdateMs = now;
 		expireWindows(now);
 		if (source === 'cache') {
-			// An expired snapshot asks for fresh data at once, unless a poll already answered for this
-			// org; its backoff (failure, free plan) stays in force (#15).
-			if (!lastUsageFetchMs && USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
+			// An expired snapshot asks for fresh data at once, but only before any poll has answered or
+			// failed for this org: a restore never shortens a backoff (failure, free plan; R6).
+			if (!lastUsageFetchMs && !usageFailures && USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
 		} else {
 			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
@@ -2459,9 +2479,11 @@ function start() {
 		const switching = !!previous;
 		currentOrgId = newOrgId;
 		orgRevision++;
+		wakeBootstrap?.(); // a start-up still waiting for the list resolves with this org
 		for (const meta of Object.values(windowFreshness)) {
 			meta.revision++;
 			meta.resetMs = null;
+			meta.live = false;
 		}
 		try {
 			if (typeof chrome !== 'undefined' && chrome.storage?.local) chrome.storage.local.set({ claude_last_org_id: newOrgId });
@@ -2486,11 +2508,16 @@ function start() {
 				.catch(() => {});
 		} else {
 			// First acceptance, however it happened (cookie, list, remembered, candidate): show the
-			// snapshot, then confirm it with one poll, since its age is unknown (A5, #15). The poll
-			// shares the freshness gate with handleUrlChange's own, so start-up polls once.
+			// snapshot, then confirm it with one poll, since its age is unknown (A5, #15). Only live
+			// readings of *both* windows make that poll unnecessary (R4); otherwise it is skipped only
+			// if a poll answered in the last 5 s, so start-up polls once.
 			Promise.resolve()
 				.then(() => restoreUsageIfNeeded())
-				.then(() => { if (!document.hidden && currentOrgId === newOrgId) refreshUsageIfStale(5000); })
+				.then(() => {
+					if (document.hidden || currentOrgId !== newOrgId) return;
+					const bothLive = USAGE_WINDOW_KEYS.every((key) => windowFreshness[key].live);
+					refreshUsageIfStale(5000, bothLive ? undefined : lastUsageFetchMs);
+				})
 				.catch(() => {});
 		}
 		for (const fn of orgChangeListeners) {
@@ -2539,7 +2566,8 @@ function start() {
 	// Restore only this organisation's missing windows, preserving any newer live readings.
 	// Concurrent callers share the restore in flight, so nobody polls before the snapshot is shown
 	// (start-up runs one from acceptActiveOrg and one from handleUrlChange, #15).
-	// Keyed by org: after a switch, the new org gets its own restore.
+	// Keyed by org: after a switch, the new org gets its own restore. While the org is unknown it does
+	// nothing (it never waits for start-up): acceptance runs the restore (R3).
 	let restoreInFlight = null;
 	function restoreUsageIfNeeded() {
 		if (!restoreInFlight || restoreInFlight.org !== currentOrgId) {
@@ -2552,7 +2580,7 @@ function start() {
 
 	async function restoreUsageNow() {
 		if (!usageMissing()) return true;
-		const orgId = await getOrgId();
+		const orgId = currentOrgId;
 		if (!orgId) return false;
 		const now = Date.now();
 		if (lastRestore.org === orgId && now - lastRestore.at < 5000) return false;
@@ -2632,12 +2660,13 @@ function start() {
 		}
 	}
 
-	// Extra refreshes share the failure/empty-answer cooldown with the periodic poll.
-	function refreshUsageIfStale(maxAgeMs) {
+	// Extra refreshes share the failure/empty-answer cooldown with the periodic poll. `since` is when
+	// the data was last known fresh (default: the newest live reading or poll answer).
+	function refreshUsageIfStale(maxAgeMs, since = Math.max(lastUsageUpdateMs, lastUsageFetchMs)) {
 		const now = Date.now();
 		if (document.hidden || usageFetchInFlight) return;
 		if ((usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs) return;
-		if (now - Math.max(lastUsageUpdateMs, lastUsageFetchMs) < maxAgeMs) return;
+		if (now - since < maxAgeMs) return;
 		refreshUsage();
 	}
 
@@ -2741,8 +2770,9 @@ function start() {
 			if (el) ui.attachUsageLine();
 		});
 
-		// Usage is org-level: restore/refresh on every page, including home/new
-		await getOrgId();
+		// Usage is org-level: restore/refresh on every page, including home/new. With no org yet,
+		// acceptance restores and polls (R3).
+		if (!(await getOrgId())) return;
 		if (usageMissing()) await restoreUsageIfNeeded();
 		if (!usageState && !lastUsageFetchMs && !usageFailures) await refreshUsage();
 		else refreshUsageIfStale(2 * 60 * 1000);

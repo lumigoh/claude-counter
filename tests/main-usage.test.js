@@ -233,6 +233,16 @@ test('M06d a later restore (another tab saved a window) does not undo the free-p
 	assert.equal(env.calls.usageRequests.length, 1, 'still within the hourly backoff');
 });
 
+test('M06e R6: a restore of an expired window does not shorten the failure backoff (final round)', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => { throw new Error('403'); } });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 1, 'the start-up poll fails: retry in 60 s');
+	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: { expired: true }, seven_day: liveWindow(12, START + 24 * HOUR) } } });
+	await env.clock.advance(50000); // the 10 s restore retry fills both windows
+	assert.equal(env.lastUsage().seven_day.utilization, 12);
+	assert.equal(env.calls.usageRequests.length, 1, 'still within the failure backoff');
+});
+
 test('M07 /usage with nothing in it never wipes what is known or saved', async () => {
 	const saved = { orgId: ORG, usage: { five_hour: liveWindow(33, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) } };
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
