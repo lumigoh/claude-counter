@@ -59,7 +59,7 @@ test('O02 without a cookie, a candidate alone does not switch away from the know
 	await env.clock.advance(3000);
 	assert.equal(env.lastUsage().five_hour.utilization, 40);
 	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === B).length, 0);
-	assert.equal(listRequests, 1, 'one re-check of the org list, then rate limited');
+	assert.equal(listRequests, 0, 'candidates never ask the org list (D1)');
 });
 
 test('O03 a genuine switch clears the screen, keeps snapshots, restores and polls the new org at once', async () => {
@@ -103,11 +103,13 @@ test('O05 A -> B -> A by genuine switches restores A and accepts A streams again
 	assert.equal(env.lastUsage().five_hour.utilization, 42);
 });
 
-test('O06 without a cookie, an org list that marks another org active is a genuine switch', async () => {
+test('O06 without a cookie, a candidate never switches; the cookie appearing later does (D1)', async () => {
 	const env = await createMainEnv({ storage: { claude_last_org_id: ORG, ...scoped(ORG, 40), ...scoped(B, 7) }, startMs: START, usage: emptyUsage });
 	env.context.fetch = async () => ({ ok: true, json: async () => [{ uuid: ORG, active: false }, { uuid: B, active: true }] });
 	await env.emit('cc:org_detected', { orgId: B });
-	await env.clock.flush();
+	await env.clock.advance(10 * MIN);
+	assert.equal(env.lastUsage().five_hour.utilization, 40, 'the start-up org stays');
+	await switchCookie(env, B);
 	assert.equal(env.lastUsage().five_hour.utilization, 7);
 });
 
@@ -128,10 +130,8 @@ test('O07 the remembered org is written once when the active org is accepted, no
 });
 
 test('O08 an org list entry is identified by its uuid (a numeric id is not an org ID)', async () => {
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
 	// Two orgs, so the sole-org fallback cannot hide an ignored `active` flag.
-	env.context.fetch = async () => ({ ok: true, json: async () => [{ id: 777, uuid: B }, { id: 12345, uuid: ORG, active: true }] });
-	await env.calls.uiOpts.onUsageRefresh();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch: list({ id: 777, uuid: B }, { id: 12345, uuid: ORG, active: true }) });
 	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
 });
 
@@ -177,35 +177,6 @@ test('O11 an org list that marks one org active beats the remembered org at star
 	assert.equal(env.stored('claude_last_org_id'), ORG);
 });
 
-test('O12a a re-check answer is discarded when a trusted source spoke meanwhile, before any switch (A3, #15)', async () => {
-	const fetch = heldFetch();
-	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
-	fetch.fail(); // start-up list request
-	await env.clock.flush();
-	await env.emit('cc:org_detected', { orgId: B }); // starts a re-check
-	env.document.cookie = `lastActiveOrg=${C}`; // no tick yet: the revision is unchanged
-	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
-	await env.clock.flush();
-	assert.ok(!env.calls.orgs.includes(B), 'the stale list answer never became active');
-	await env.clock.advance(1000);
-	assert.equal(env.stored('claude_last_org_id'), C);
-});
-
-test('O12b a re-check answer is discarded when the org changed meanwhile, even with no trusted source now (A3, #15)', async () => {
-	const fetch = heldFetch();
-	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
-	fetch.fail();
-	await env.clock.flush();
-	await env.emit('cc:org_detected', { orgId: B });
-	env.document.cookie = `lastActiveOrg=${C}`;
-	await env.clock.advance(1000); // the tick accepts C: the revision changes
-	env.document.cookie = ''; // and the cookie is unreadable again
-	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
-	await env.clock.flush();
-	assert.ok(!env.calls.orgs.includes(B));
-	assert.equal(env.stored('claude_last_org_id'), C);
-});
-
 test('O13 concurrent start-up resolution shares one org list request and uses the first candidate (A4)', async () => {
 	const fetch = heldFetch();
 	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
@@ -228,26 +199,6 @@ test('O14 bootstrapping from a candidate polls usage at once (A5)', async () => 
 test('O15 page storage keys are validated separately (A6)', async () => {
 	const env = await createMainEnv({ startMs: START, usage: emptyUsage, pageStorage: { lastActiveOrg: 'not an id', currentOrganizationId: ORG } });
 	assert.equal(env.calls.usageRequests.at(-1)?.orgId, ORG);
-});
-
-test('O16 a differing candidate during the re-check cooldown schedules one re-check at expiry (A7)', async () => {
-	let answer = [{ uuid: ORG, active: true }, { uuid: B }];
-	let listRequests = 0;
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch: async () => { listRequests++; return { ok: true, json: async () => answer }; } });
-	assert.equal(env.stored('claude_last_org_id'), ORG);
-	const startup = listRequests;
-	await env.emit('cc:org_detected', { orgId: B });
-	await env.clock.flush();
-	assert.equal(listRequests - startup, 1, 'first re-check');
-	answer = [{ uuid: ORG }, { uuid: B, active: true }]; // the user switches org; no cookie
-	await env.clock.advance(MIN);
-	await env.emit('cc:org_detected', { orgId: B });
-	await env.emit('cc:org_detected', { orgId: B });
-	await env.clock.flush();
-	assert.equal(listRequests - startup, 1, 'still cooling down');
-	await env.clock.advance(4 * MIN + 1000);
-	assert.equal(listRequests - startup, 2, 'exactly one re-check at expiry');
-	assert.equal(env.stored('claude_last_org_id'), B);
 });
 
 test('O17 an event labelled with the newly chosen org is applied within the tick lag (A8)', async () => {
@@ -385,28 +336,6 @@ test('O24 a cookie that appears while the start-up list is pending beats the lis
 	assert.ok(env.calls.usageRequests.every((r) => r.orgId === C));
 });
 
-test('O25 a candidate seen while a re-check is in flight is re-checked at cooldown expiry (A7)', async () => {
-	const answers = [];
-	let held = null;
-	const fetch = async () => {
-		const next = answers.shift();
-		if (next === 'hold') return new Promise((resolve) => { held = resolve; });
-		return { ok: true, json: async () => next };
-	};
-	answers.push([{ uuid: ORG, active: true }, { uuid: B }, { uuid: C }]); // start-up
-	answers.push('hold'); // re-check started by B
-	answers.push([{ uuid: ORG }, { uuid: B }, { uuid: C, active: true }]); // the later re-check
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
-	assert.equal(env.stored('claude_last_org_id'), ORG);
-	await env.emit('cc:org_detected', { orgId: B });
-	await env.emit('cc:org_detected', { orgId: C }); // the user moved to C, no cookie
-	held({ ok: true, json: async () => [{ uuid: ORG, active: true }, { uuid: B }, { uuid: C }] }); // the old selection
-	await env.clock.flush();
-	assert.equal(env.stored('claude_last_org_id'), ORG);
-	await env.clock.advance(5 * MIN + 1000);
-	assert.equal(env.stored('claude_last_org_id'), C, 'C was not lost');
-});
-
 test('O27 a candidate bootstrap with a complete snapshot still polls at once (A5)', async () => {
 	const both = { [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: liveWindow(40, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) } } };
 	const env = await createMainEnv({ storage: both, startMs: START, usage: emptyUsage });
@@ -484,20 +413,6 @@ test('O28 a labelled turn end that arrives before the first org is accepted stil
 
 // ---- final round: start-up rules R1–R4 (each test targets one rule, not one reported scenario) ----
 
-test('O31 R2: a late start-up list answer never overrides a re-check that confirmed the fallback', async () => {
-	const fetch = heldFetch();
-	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
-	await env.clock.advance(2000); // fallback: the remembered org
-	await env.emit('cc:org_detected', { orgId: B }); // starts a re-check (second list request)
-	assert.equal(fetch.calls(), 2);
-	fetch.answerAt(1, [{ uuid: ORG, active: true }, { uuid: B }]); // the newer re-check confirms ORG
-	await env.clock.flush();
-	fetch.answerAt(0, [{ uuid: ORG }, { uuid: B, active: true }]); // the older start-up answer lands last
-	await env.clock.flush();
-	assert.equal(env.stored('claude_last_org_id'), ORG);
-	assert.ok(env.calls.usageRequests.every((r) => r.orgId === ORG), 'B is never polled');
-});
-
 test('O32 R1: with no fallback and a stalled list, start-up makes one list request, then a candidate decides', async () => {
 	const fetch = heldFetch();
 	const env = await createMainEnv({ storage: { ...scoped(ORG, 40) }, startMs: START, usage: emptyUsage, fetch });
@@ -572,13 +487,21 @@ test('O33b R1: a slow remembered-org read is bounded by the 2 s wait when the li
 	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [B], 'the candidate is used at 2 s');
 });
 
-test('O32b R1: a list that names nothing and no candidate: start-up still makes one list request', async () => {
+test('O32b D2: after an inconclusive list, later callers never start another list request', async () => {
 	let listRequests = 0;
 	const fetch = async () => { listRequests++; return { ok: true, json: async () => [{ uuid: ORG }, { uuid: B }] }; };
 	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(3000);
+	env.window.dispatchEvent({ type: 'focus' });
+	await env.navigate('/new');
+	await env.calls.uiOpts.onUsageRefresh();
 	await env.clock.advance(12000);
 	assert.equal(listRequests, 1);
 	assert.equal(env.calls.usageRequests.length, 0);
+	await env.emit('cc:org_detected', { orgId: B }); // the first candidate becomes the org
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), B);
+	assert.equal(listRequests, 1);
 });
 
 test('O35b R4: live readings of both windows before the start-up check make its poll unnecessary', async () => {
@@ -606,28 +529,139 @@ test('O28b a start-up still waiting for the list resolves when the cookie tick a
 	assert.equal(fetch.calls(), 1, 'the stalled list is never asked again');
 });
 
-test('O36 R5: every differing candidate seen during an in-flight re-check gets one later re-check (A7)', async () => {
-	const answers = [];
-	let held = null;
+
+test('O37 D1: after start-up, candidates never ask the org list again, before or after an org is known', async () => {
 	let listRequests = 0;
-	const fetch = async () => {
-		listRequests++;
-		const next = answers.shift();
-		if (next === 'hold') return new Promise((resolve) => { held = resolve; });
-		return { ok: true, json: async () => next };
-	};
-	answers.push([{ uuid: ORG, active: true }, { uuid: B }, { uuid: C }]); // start-up
-	answers.push('hold'); // re-check started by B
-	answers.push([{ uuid: ORG }, { uuid: B }, { uuid: C, active: true }]); // the later re-check
+	const fetch = async () => { listRequests++; return { ok: true, json: async () => [{ uuid: ORG, active: true }, { uuid: B }] }; };
 	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	for (let i = 0; i < 5; i++) await env.emit('cc:org_detected', { orgId: i % 2 ? B : C });
+	await env.clock.advance(20 * MIN);
 	await env.emit('cc:org_detected', { orgId: B });
+	await env.clock.advance(20 * MIN);
+	assert.equal(listRequests, 1);
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === ORG));
+});
+
+// ---- simplification D3/D4: every poll waits for the org's snapshot step, one freshness rule ----
+
+/** Holds every snapshot (usage state) read; returns the held callbacks. */
+function holdSnapshotReads(e) {
+	const held = [];
+	const get = e.chrome.storage.local.get;
+	e.chrome.storage.local.get = (keys, cb) => {
+		if ([].concat(keys).some((k) => String(k).startsWith('claude_usage_state'))) held.push(() => get(keys, cb));
+		else get(keys, cb);
+	};
+	return held;
+}
+
+test('O38 D3: a focus poll waits for the snapshot; the snapshot always shows before a poll answer', async () => {
+	let held;
+	const env = await createMainEnv({
+		storage: scoped(ORG, 40), cookie: `lastActiveOrg=${ORG}`, startMs: START,
+		usage: async () => ({ five_hour: liveWindow(55, START + HOUR), seven_day: liveWindow(9, START + 24 * HOUR) }),
+		beforeStart: (e) => { held = holdSnapshotReads(e); }
+	});
+	env.window.dispatchEvent({ type: 'focus' });
+	await env.clock.advance(3000);
+	assert.equal(env.calls.usageRequests.length, 0, 'nothing polls before the snapshot step');
+	while (held.length) { held.shift()(); await env.clock.flush(); }
+	const shown = env.calls.setUsage.filter(Boolean).map((u) => u.five_hour?.utilization);
+	assert.deepEqual(shown, [40, 55]);
+	assert.equal(env.calls.usageRequests.length, 1, 'one poll');
+});
+
+test('O39 D3: switching while both restores are held polls the new org once, after its snapshot', async () => {
+	let held = null;
+	const env = await createMainEnv({
+		storage: { ...scoped(ORG, 40), ...scoped(B, 7) }, cookie: `lastActiveOrg=${ORG}`, startMs: START,
+		usage: async (orgId) => ({ five_hour: liveWindow(orgId === B ? 8 : 41, START + HOUR), seven_day: null }),
+		beforeStart: (e) => { held = holdSnapshotReads(e); }
+	});
+	env.document.cookie = `lastActiveOrg=${B}`;
+	await env.clock.advance(1000); // switch to B with A's restore still held
+	held.shift()(); await env.clock.flush(); // A's read lands first
+	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === B).length, 0, 'B waits for its own snapshot');
+	while (held.length) { held.shift()(); await env.clock.flush(); }
+	await env.clock.advance(3000);
+	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === B).length, 1);
+	const shownB = env.calls.setUsage.filter(Boolean).map((u) => u.five_hour?.utilization);
+	assert.deepEqual(shownB.slice(-2), [7, 8], 'B snapshot, then B poll');
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === B), 'A is never polled');
+});
+
+test('O40 D4: a session-only reading in a hidden tab does not make the poll on showing unnecessary', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, fetch, usage: async () => ({ five_hour: liveWindow(31, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) }) });
+	env.document.hidden = true;
+	await env.clock.advance(3000);
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: null }), { orgId: ORG, openedAt: env.clock.now });
+	await env.clock.advance(2000);
+	assert.equal(env.calls.usageRequests.length, 0, 'hidden: nothing asked');
+	env.document.hidden = false;
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 1);
+	assert.equal(env.lastUsage().seven_day.utilization, 12);
+});
+
+test('O41 D2/D3: a poll waiting on start-up does not poll again after acceptance already did (free plan)', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(500);
+	env.window.dispatchEvent({ type: 'focus' }); // joins the start-up wait
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.clock.advance(5000); // the tick accepts at 1 s; start-up settles at 2 s
+	assert.equal(env.calls.usageRequests.length, 1, 'the empty answer starts the hourly backoff');
+});
+
+test('O42 D2: a candidate during the start-up wait does not pre-empt a list that names the active org', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
 	await env.emit('cc:org_detected', { orgId: C });
-	await env.emit('cc:org_detected', { orgId: B }); // the latest candidate is B again
-	held({ ok: true, json: async () => [{ uuid: ORG }, { uuid: B, active: true }, { uuid: C }] });
+	await env.clock.advance(500);
+	fetch.answer([{ uuid: C }, { uuid: B, active: true }]);
+	await env.clock.advance(3000);
+	assert.equal(env.stored('claude_last_org_id'), B);
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === B));
+});
+
+test('O43 R2: when start-up found nothing, a late list answer may supply the first org', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(5000);
+	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
 	await env.clock.flush();
 	assert.equal(env.stored('claude_last_org_id'), B);
-	await env.clock.advance(5 * MIN + 1000);
-	assert.equal(env.stored('claude_last_org_id'), C, 'C was not lost');
-	await env.clock.advance(30 * MIN);
-	assert.equal(listRequests, 3, 'and no further re-checks without new candidates');
+});
+
+test('O44 R2: ...but never replaces an org a candidate supplied in the meantime', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(3000);
+	await env.emit('cc:org_detected', { orgId: ORG });
+	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
+	await env.clock.advance(3000);
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === ORG));
+});
+
+test('O45 D3: A -> B -> A while restores are held: the old A poll waits for the new A snapshot', async () => {
+	let held = null;
+	const env = await createMainEnv({
+		storage: { ...scoped(ORG, 40), ...scoped(B, 7) }, cookie: `lastActiveOrg=${ORG}`, startMs: START,
+		usage: async (orgId) => ({ five_hour: liveWindow(orgId === B ? 8 : 41, START + HOUR), seven_day: null }),
+		beforeStart: (e) => { held = holdSnapshotReads(e); }
+	});
+	await switchCookie(env, B);
+	await switchCookie(env, ORG);
+	held.shift()(); await env.clock.flush(); // the first A restore lands
+	held.shift()(); await env.clock.flush(); // B's lands
+	assert.equal(env.calls.usageRequests.length, 0, 'nothing polls before the current A snapshot step');
+	while (held.length) { held.shift()(); await env.clock.flush(); }
+	await env.clock.advance(3000);
+	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [ORG]);
+	assert.equal(env.lastUsage().five_hour.utilization, 41);
 });
