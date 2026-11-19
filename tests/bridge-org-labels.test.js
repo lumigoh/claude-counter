@@ -19,20 +19,23 @@ const B = '99999999-8888-4777-8666-555555555555';
 const quotaFrame = (cursor, pct) => proto.connectFrame(0, proto.limitsPayload({ cursor, windows: [['5h', 1, 1791749400, pct]] }));
 const limitMessages = (env) => env.messages.filter((m) => m.type === 'cc:message_limit');
 
-function streamingEnv(cookie, nowMs) {
+/** `holdHeaders`: each stream's response waits until `release()`, so the clock can move in between. */
+function streamingEnv(cookie, nowMs, { holdHeaders = false } = {}) {
 	const streams = [];
+	const held = [];
 	const env = createBridgeEnv({
 		cookie,
 		nowMs,
 		originalFetch: async (url) => {
 			if (!String(url).includes('StreamTimeline')) return new Response('{}');
+			if (holdHeaders) await new Promise((resolve) => held.push(resolve));
 			let controller;
 			const body = new ReadableStream({ start(c) { controller = c; } });
 			streams.push({ push: (b) => controller.enqueue(b), close: () => controller.close() });
 			return new Response(body, { headers: { 'content-type': 'application/connect+proto' } });
 		}
 	});
-	return { env, streams };
+	return { env, streams, release: () => held.shift()() };
 }
 
 test('S01 incidental requests for another org do not silence an open stream', async () => {
@@ -61,9 +64,12 @@ test('S02 A -> B -> A: the stream opened under A keeps its A label and keeps del
 test('S03 every stream message carries the time its stream was opened', async () => {
 	const opened = 1791743968000;
 	const clock = { now: opened };
-	const { env, streams } = streamingEnv('', clock);
-	await env.fetch(STREAM_URL, { method: 'POST' });
-	clock.now = opened + 5000; // delivered later than the stream opened (#17)
+	const { env, streams, release } = streamingEnv('', clock, { holdHeaders: true });
+	const opening = env.fetch(STREAM_URL, { method: 'POST' });
+	clock.now = opened + 2000; // the response headers arrive later than the request (#17)
+	release();
+	await opening;
+	clock.now = opened + 5000; // and the frame later still
 	streams[0].push(quotaFrame('2000-1', 0.4)); await settle();
 	const [message] = limitMessages(env);
 	assert.equal(message.meta.orgId, null, 'no cookie: the stream is honestly unlabelled');
@@ -96,18 +102,31 @@ test('S05 unlabelled streams keep separate cursors: a late frame of one cannot h
 test('S06 turn ends carry their stream label, on Connect and legacy streams (B5)', async () => {
 	const opened = 1791743968000;
 	const clock = { now: opened };
-	const { env, streams } = streamingEnv(`lastActiveOrg=${ORG}`, clock);
-	await env.fetch(STREAM_URL, { method: 'POST' });
-	clock.now = opened + 5000; // delivered later than the stream opened (#17)
+	const { env, streams, release } = streamingEnv(`lastActiveOrg=${ORG}`, clock, { holdHeaders: true });
+	const opening = env.fetch(STREAM_URL, { method: 'POST' });
+	clock.now = opened + 2000; // headers after the request (#17)
+	release();
+	await opening;
+	clock.now = opened + 5000; // delivered later than the stream opened
 	streams[0].push(proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened + 1000}-0`, windows: [['5h', 1, 1791749400, 0.4]] }))); await settle();
 	const ends = env.messages.filter((m) => m.type === 'cc:turn_end');
 	assert.deepEqual(ends.map((m) => m.meta), [{ orgId: ORG, openedAt: opened }]);
 
 	const sse = `data: ${JSON.stringify({ type: 'message_limit', windows: { '5h': { utilization: 0.3, resets_at: 1791749400 } } })}\n\n`;
 	const legacyClock = { now: opened };
-	const legacy = createBridgeEnv({ cookie: `lastActiveOrg=${ORG}`, nowMs: legacyClock, originalFetch: async () => streamResponse([Buffer.from(sse)], { contentType: 'text/event-stream', delayMs: 10 }) });
-	const response = await legacy.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' });
-	legacyClock.now = opened + 5000; // the body arrives after the request opened
+	let releaseLegacy;
+	const legacy = createBridgeEnv({
+		cookie: `lastActiveOrg=${ORG}`, nowMs: legacyClock,
+		originalFetch: async () => {
+			await new Promise((resolve) => { releaseLegacy = resolve; });
+			return streamResponse([Buffer.from(sse)], { contentType: 'text/event-stream', delayMs: 10 });
+		}
+	});
+	const legacyOpening = legacy.fetch(`https://claude.ai/api/organizations/${B}/chat_conversations/c/completion`, { method: 'POST' });
+	legacyClock.now = opened + 2000; // headers after the request
+	releaseLegacy();
+	const response = await legacyOpening;
+	legacyClock.now = opened + 5000; // the body arrives later still
 	await readAll(response);
 	await settle();
 	assert.deepEqual(legacy.messages.filter((m) => m.type === 'cc:turn_end').map((m) => m.meta), [{ orgId: B, openedAt: opened }]);
@@ -129,4 +148,22 @@ test('S07 unlabelled stream churn cannot evict a labelled org\'s cursors (B4, #1
 	const before = limitMessages(env).length;
 	streams.at(-1).push(both('2000-1', 0.39)); await settle();
 	assert.equal(limitMessages(env).length, before, 'the older labelled frame is still rejected');
+});
+
+test('S07b unlabelled churn cannot evict a labelled org\'s seen event ids (B4)', async () => {
+	// An id with no "<ms>-<n>" cursor is protected by the seen set alone, so no cursor can mask it.
+	const { env, streams } = streamingEnv(`lastActiveOrg=${ORG}`);
+	await env.fetch(STREAM_URL, { method: 'POST' });
+	streams[0].push(quotaFrame('evt-labelled', 0.4)); await settle();
+	env.document.cookie = '';
+	for (let i = 0; i < 40; i++) {
+		await env.fetch(STREAM_URL, { method: 'POST' });
+		streams.at(-1).push(quotaFrame(`evt-${i}`, 0.2));
+	}
+	await settle(60);
+	env.document.cookie = `lastActiveOrg=${ORG}`;
+	await env.fetch(STREAM_URL, { method: 'POST' });
+	const before = limitMessages(env).length;
+	streams.at(-1).push(quotaFrame('evt-labelled', 0.4)); await settle();
+	assert.equal(limitMessages(env).length, before, 'the replayed labelled event is still recognised');
 });

@@ -202,7 +202,6 @@
 
 		/** Forget the shown readings and invalidate any history load still in flight (#14). */
 		_resetHistory() {
-			this._historySeq = (this._historySeq || 0) + 1;
 			this._historyLoad = null;
 			this.sessionHistory = [];
 			this.sessionResetKey = null;
@@ -582,11 +581,10 @@
 				return;
 			}
 
-			const seq = (this._historySeq = (this._historySeq || 0) + 1);
-			const load = { key, resetsAt, seq, pending: [currentPct] };
+			const load = { key, resetsAt, pending: [currentPct] };
 			this._historyLoad = load;
 			const finish = (storedResetsAt, storedHistory) => {
-				if (this._historyLoad !== load || this._historySeq !== seq) return; // superseded
+				if (this._historyLoad !== load) return; // superseded: reset, switched, or a newer load
 				this._historyLoad = null;
 				const base = storedResetsAt === resetsAt && Array.isArray(storedHistory) ? storedHistory : [];
 				this._applyReadings(key, resetsAt, base, load.pending);

@@ -460,17 +460,17 @@ function heldHistoryReads(env) {
 	return reads;
 }
 
-test('U69 a history read for org A that lands after switching to B is ignored (C2)', async () => {
+test('U69a a history read for org A that lands after switching to B is ignored (C2, switch only)', async () => {
 	const env = createUiEnv();
 	const resets_at = iso(START + HOUR);
 	env.storageData['claude_session_history:org-a-0001'] = { version: 2, resets_at, history: [10, 20, 30] };
 	const reads = heldHistoryReads(env);
 	env.ui.setOrg('org-a-0001');
 	env.ui.setUsage({ five_hour: { utilization: 30, resets_at } }); // A's read, held
-	env.ui.setOrg('org-b-0002'); // what main.js does on a switch
-	env.ui.setUsage(null);
-	reads[0](); // A's read lands late
+	env.ui.setOrg('org-b-0002'); // switch only: no clear in between
+	reads[0](); // A's read lands late, before B's first reading
 	await env.clock.flush();
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/, "A's readings never show under B");
 	env.ui.setUsage({ five_hour: { utilization: 34, resets_at } }); // B, same reset time
 	reads.at(-1)();
 	await env.clock.flush();
@@ -481,12 +481,30 @@ test('U69 a history read for org A that lands after switching to B is ignored (C
 	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 34% → 40%/);
 });
 
+test('U69b a history read that lands after the bars were cleared is ignored (C2, clear only)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.storageData[key] = { version: 2, resets_at, history: [10, 20, 30] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 35, resets_at } }); // read held
+	env.ui.setUsage(null); // cleared, same org
+	reads[0]();
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 20, 30], 'the queued reading is not saved');
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+});
+
 test('U70 readings that arrive while the saved history loads are appended to it, not written over it (C2)', async () => {
 	const env = createUiEnv();
 	const resets_at = iso(START + HOUR);
 	const key = 'claude_session_history:org-a-0001';
 	env.storageData[key] = { version: 2, resets_at, history: [10] };
 	const reads = heldHistoryReads(env);
+	const set = env.chrome.storage.local.set;
+	let writes = 0;
+	env.chrome.storage.local.set = (items, cb) => { if (key in items) writes++; return set(items, cb); };
 	env.ui.setOrg('org-a-0001');
 	env.ui.setUsage({ five_hour: { utilization: 20, resets_at } });
 	env.ui.setUsage({ five_hour: { utilization: 25, resets_at } });
@@ -496,4 +514,5 @@ test('U70 readings that arrive while the saved history loads are appended to it,
 	reads[0]();
 	await env.clock.flush();
 	assert.deepEqual(env.storageData[key].history, [10, 20, 25]);
+	assert.equal(writes, 1, 'the queue is saved once');
 });
