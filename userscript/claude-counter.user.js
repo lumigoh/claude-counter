@@ -1248,23 +1248,50 @@ function start() {
 
 	const CC = (globalThis.ClaudeCounter = globalThis.ClaudeCounter || {});
 
+	// Every user-visible string, per language (#6). The page language decides; anything not Spanish
+	// falls back to English. Keep both tables complete: a missing key would show "undefined".
 	const IS_ES = /^es\b/i.test(document.documentElement.lang || globalThis.navigator?.language || '');
 	const L = IS_ES
 		? {
 				session: 'Sesión',
 				weekly: 'Semana',
-				resetsIn: 'Se reinicia en',
-				sessionTip: 'Ventana de uso de 5 horas.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.',
-				weeklyTip: 'Ventana de uso de 7 días.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.'
+				resetsIn: 'se reinicia en',
+				noData: 'sin datos aún',
+				sessionHeading: 'Cuota de sesión · 5 horas',
+				weeklyHeading: 'Cuota semanal · 7 días, todos los modelos',
+				noDataTip: 'Aún no hay datos. Envía un mensaje o haz clic en las barras para actualizar.',
+				expiredTip: 'Se alcanzó la hora de reinicio. Actualiza para confirmar tu cuota disponible.',
+				usedRemaining: (used, left) => `${used}% usado · ${left}% restante`,
+				resetsAtLocal: (time) => `Se reinicia ${time} (hora local)`,
+				legend: 'Relleno = uso · marca = tiempo transcurrido',
+				recentReadings: (list) => `Lecturas recientes: ${list}`,
+				clickToRefresh: 'Haz clic en las barras para actualizar.',
+				tokensPlaceholder: 'Tokens: —',
+				tokens: (n) => `~${n} tokens`,
+				tokensUnavailable: 'Tokens no disponibles',
+				counting: 'Contando…',
+				tokenTip: 'Tokens aproximados de la conversación\nCuenta el historial visible del chat, no el contexto activo de Claude.\nPuede ser inexacto tras una compactación. Haz clic en el recuento para volver a contar.'
 			}
 		: {
 				session: 'Session',
 				weekly: 'Weekly',
 				resetsIn: 'resets in',
-				sessionTip: '5-hour session window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.',
-				weeklyTip: '7-day usage window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.'
+				noData: 'no data yet',
+				sessionHeading: 'Session quota · 5 hours',
+				weeklyHeading: 'Weekly quota · 7 days, all models',
+				noDataTip: 'No data yet. Send a message or click the bars to refresh.',
+				expiredTip: 'Reset time reached. Refresh to confirm your available quota.',
+				usedRemaining: (used, left) => `${used}% used · ${left}% remaining`,
+				resetsAtLocal: (time) => `Resets ${time} (local time)`,
+				legend: 'Fill = usage · tick = time elapsed',
+				recentReadings: (list) => `Recent readings: ${list}`,
+				clickToRefresh: 'Click the bars to refresh.',
+				tokensPlaceholder: 'Tokens: —',
+				tokens: (n) => `~${n} tokens`,
+				tokensUnavailable: 'Tokens unavailable',
+				counting: 'Counting…',
+				tokenTip: 'Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.'
 			};
-
 
 	function formatResetCountdown(timestampMs) {
 		// <= 0: reset time reached
@@ -1551,7 +1578,7 @@ function start() {
 			this.tokenDisplay = document.createElement('button');
 			this.tokenDisplay.type = 'button';
 			this.tokenDisplay.className = 'cc-tokenCounter cc-hidden';
-			this.tokenDisplay.textContent = 'Tokens: —';
+			this.tokenDisplay.textContent = L.tokensPlaceholder;
 			this.tokenDisplay.addEventListener('click', (event) => {
 				event.stopPropagation();
 				this.onTokenCounterRefresh();
@@ -1587,7 +1614,7 @@ function start() {
 				bar.appendChild(marker);
 				const pct = document.createElement('span');
 				pct.className = 'cc-usagePct';
-				pct.textContent = 'no data yet';
+				pct.textContent = L.noData;
 				const reset = document.createElement('span');
 				reset.className = 'cc-usageReset';
 				for (const el of [labelEl, bar, pct, reset]) span.appendChild(el);
@@ -1629,11 +1656,11 @@ function start() {
 			const visible = enabled && active;
 			this.tokenDisplay.classList.toggle('cc-hidden', !visible);
 			this.usageLine.classList.toggle('cc-usageRow--tokens', visible);
-			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? `~${totalTokens.toLocaleString()} tokens` : status === 'error' ? 'Tokens unavailable' : 'Counting…';
+			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? L.tokens(totalTokens.toLocaleString()) : status === 'error' ? L.tokensUnavailable : L.counting;
 		}
 
 		_setupTooltips() {
-			this.tokenTooltip = makeTooltip('Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.');
+			this.tokenTooltip = makeTooltip(L.tokenTip);
 			setupTooltip(this.tokenDisplay, this.tokenTooltip, { topOffset: 8 });
 			this.sessionTooltip = makeTooltip(
 				this._usageTooltipText('session')
@@ -1726,16 +1753,16 @@ function start() {
 
 		_usageTooltipText(key) {
 			const w = this._tooltipUsage?.[key === 'session' ? 'five_hour' : 'seven_day'];
-			const heading = key === 'session' ? `${L.session} quota · 5 hours` : `${L.weekly} quota · 7 days, all models`;
-			if (!w) return `${heading}\nNo data yet. Send a message or click the bars to refresh.`;
-			if (w.expired) return `${heading}\nReset time reached. Refresh to confirm your available quota.`;
+			const heading = key === 'session' ? L.sessionHeading : L.weeklyHeading;
+			if (!w) return `${heading}\n${L.noDataTip}`;
+			if (w.expired) return `${heading}\n${L.expiredTip}`;
 			const pct = Math.round(Math.max(0, Math.min(100, w.utilization)) * 10) / 10;
-			const lines = [heading, `${pct}% used · ${Math.round((100 - pct) * 10) / 10}% remaining`];
+			const lines = [heading, L.usedRemaining(pct, Math.round((100 - pct) * 10) / 10)];
 			const resetMs = w.resets_at ? Date.parse(w.resets_at) : NaN;
-			if (Number.isFinite(resetMs)) lines.push(`Resets ${new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (local time)`);
-			lines.push('Fill = usage · tick = time elapsed');
-			if (key === 'session' && this.sessionHistory.length > 1) lines.push(`Recent readings: ${this.sessionHistory.map((v) => `${v}%`).join(' → ')}`);
-			lines.push('Click the bars to refresh.');
+			if (Number.isFinite(resetMs)) lines.push(L.resetsAtLocal(new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })));
+			lines.push(L.legend);
+			if (key === 'session' && this.sessionHistory.length > 1) lines.push(L.recentReadings(this.sessionHistory.map((v) => `${v}%`).join(' → ')));
+			lines.push(L.clickToRefresh);
 			return lines.join('\n');
 		}
 
@@ -1825,7 +1852,7 @@ function start() {
 				return { resetMs, startMs: resetMs ? resetMs - windowMs : null, pct, live: true };
 			}
 
-			pctSpan.textContent = w && w.expired ? '0%' : 'no data yet';
+			pctSpan.textContent = w && w.expired ? '0%' : L.noData;
 			resetSpan.textContent = '';
 			fill.style.width = '0%';
 			fill.classList.remove('cc-caution', 'cc-warn', 'cc-full');

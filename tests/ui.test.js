@@ -333,3 +333,26 @@ test('U62 tooltips appear on keyboard focus and hide on blur (#6)', () => {
 	for (const fn of env.ui.weeklyGroup.listeners.blur) fn({});
 	assert.equal(env.ui.weeklyTooltip.style.visibility, 'hidden');
 });
+
+test('U63 Spanish pages get whole tooltips and token texts in Spanish, not just the labels (#6)', async () => {
+	const env = createUiEnv({ lang: 'es-ES' });
+	const english = /quota|used|remaining|Resets|local time|Click|No data|Recent|Fill|Counting|unavailable|Approximate|Reset time/;
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, english);
+	assert.match(env.ui.sessionTooltip.textContent, /Cuota de sesión · 5 horas/);
+	const resets_at = iso(START + HOUR);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at }, seven_day: { expired: true } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at }, seven_day: { expired: true } });
+	await env.clock.flush();
+	for (const tip of [env.ui.sessionTooltip, env.ui.weeklyTooltip, env.ui.tokenTooltip]) assert.doesNotMatch(tip.textContent, english);
+	assert.match(env.ui.sessionTooltip.textContent, /45% usado · 55% restante/);
+	assert.match(env.ui.sessionTooltip.textContent, /Lecturas recientes: 40% → 45%/);
+	assert.match(env.ui.weeklyTooltip.textContent, /Cuota semanal/);
+	env.ui.setUsage(null);
+	assert.equal(env.ui.sessionPctSpan.textContent, 'sin datos aún');
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'loading' });
+	assert.equal(env.ui.tokenDisplay.textContent, 'Contando…');
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'error' });
+	assert.equal(env.ui.tokenDisplay.textContent, 'Tokens no disponibles');
+});
