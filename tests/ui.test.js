@@ -330,8 +330,12 @@ test('U61 Session and Weekly are keyboard buttons that refresh and describe them
 		assert.equal(env.refreshes.length, before + 2);
 		assert.equal(await press(group, 'a'), false);
 		// Held keys and shortcuts belong to the browser or page, not to a refresh (C3, #12).
-		for (const extra of [{ repeat: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }]) {
+		// A held key is still ours (no scrolling) but refreshes only once (#14).
+		assert.equal(await press(group, ' ', { repeat: true }), true, 'held Space never scrolls the page');
+		assert.equal(await press(group, 'Enter', { repeat: true }), true);
+		for (const extra of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }]) {
 			assert.equal(await press(group, 'Enter', extra), false, JSON.stringify(extra));
+			assert.equal(await press(group, ' ', extra), false, `Space ${JSON.stringify(extra)}`);
 		}
 		assert.equal(env.refreshes.length, before + 2);
 	}
@@ -445,4 +449,51 @@ test('U65 the fade stays hidden on pages without a transcript and when the bars 
 		assert.equal(fadeOn(path).style.display, 'none', path);
 	}
 	assert.equal(fadeOn('/code/session_01PWd9m9bo3k1fLhqDAJHu8w', { rowTop: 900 }).style.display, 'none', 'row below the viewport');
+});
+
+// ---- targeted review (#14): history loads cannot outlive their org or lose readings ----------
+
+function heldHistoryReads(env) {
+	const reads = [];
+	const get = env.chrome.storage.local.get;
+	env.chrome.storage.local.get = (keys, cb) => reads.push(() => get(keys, cb));
+	return reads;
+}
+
+test('U69 a history read for org A that lands after switching to B is ignored (C2)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	env.storageData['claude_session_history:org-a-0001'] = { version: 2, resets_at, history: [10, 20, 30] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 30, resets_at } }); // A's read, held
+	env.ui.setOrg('org-b-0002'); // what main.js does on a switch
+	env.ui.setUsage(null);
+	reads[0](); // A's read lands late
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 34, resets_at } }); // B, same reset time
+	reads.at(-1)();
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } });
+	await env.clock.flush();
+	assert.deepEqual(env.storageData['claude_session_history:org-b-0002'].history, [34, 40]);
+	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [10, 20, 30], 'A is untouched');
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 34% → 40%/);
+});
+
+test('U70 readings that arrive while the saved history loads are appended to it, not written over it (C2)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.storageData[key] = { version: 2, resets_at, history: [10] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at } });
+	env.ui.setUsage({ five_hour: { utilization: 25, resets_at } });
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10], 'nothing is saved before the load lands');
+	assert.equal(reads.length, 1, 'one load for the window');
+	reads[0]();
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 20, 25]);
 });

@@ -197,6 +197,13 @@
 		setOrg(orgId) {
 			if (orgId === this.orgId) return;
 			this.orgId = orgId || null;
+			this._resetHistory();
+		}
+
+		/** Forget the shown readings and invalidate any history load still in flight (#14). */
+		_resetHistory() {
+			this._historySeq = (this._historySeq || 0) + 1;
+			this._historyLoad = null;
 			this.sessionHistory = [];
 			this.sessionResetKey = null;
 			this._updateSessionTooltip();
@@ -368,9 +375,12 @@
 				group.setAttribute('tabindex', '0');
 				group.addEventListener('keydown', (event) => {
 					if (event.key !== 'Enter' && event.key !== ' ') return;
-					// Held keys and shortcuts (Ctrl/Cmd/Alt/Shift+Enter) are not a refresh request (#12).
-					if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+					// Shortcuts (Ctrl/Cmd/Alt/Shift + key) belong to the browser or page (#12).
+					if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+					// Plain Enter/Space are ours, so Space never scrolls the page, even when held (#14).
+					// A held key refreshes only once.
 					event.preventDefault();
+					if (event.repeat) return;
 					return this._requestUsageRefresh();
 				});
 				const span = document.createElement('span');
@@ -544,68 +554,74 @@
 			if (this.sessionTooltip) this.sessionTooltip.textContent = this._usageTooltipText('session');
 		}
 
+		/**
+		 * Recent session readings, saved per organisation and reset window (#6, #14).
+		 *
+		 * A window's saved history is loaded from storage once. Until that load lands, new readings are
+		 * queued rather than processed, so they can't overwrite the saved history. When the load
+		 * lands, the queue is applied on top of it and saved once. A load belongs to one org and one
+		 * window: switching org, clearing, or a new window invalidates it, so a late read can never
+		 * leak one organisation's readings into another's.
+		 */
 		_updateSessionHistory(resetsAt, currentPct) {
 			if (!resetsAt) {
-				this.sessionHistory = [];
-				this.sessionResetKey = null;
-				this._updateSessionTooltip();
+				this._resetHistory();
+				return;
+			}
+			const key = this._historyKey();
+
+			// Already loaded for this window: update in memory and save.
+			if (this.sessionResetKey === resetsAt) {
+				this._applyReadings(key, resetsAt, this.sessionHistory, [currentPct]);
+				return;
+			}
+			// A load for this window is in flight: queue the reading for it.
+			const pendingLoad = this._historyLoad;
+			if (pendingLoad && pendingLoad.key === key && pendingLoad.resetsAt === resetsAt) {
+				pendingLoad.pending.push(currentPct);
 				return;
 			}
 
-			const key = this._historyKey();
-			// Every call gets a sequence number; a storage read that finishes after a newer call (for
-			// any org, including A -> B -> A) is stale and ignored (#12).
 			const seq = (this._historySeq = (this._historySeq || 0) + 1);
-			const processHistory = (storedResetsAt, storedHistory) => {
-				if (seq !== this._historySeq) return;
-				let history = [];
-				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
-					history = [...storedHistory];
-				} else {
-					history = [currentPct];
-				}
-
-				const lastVal = history[history.length - 1];
-				if (currentPct > lastVal) {
-					history.push(currentPct);
-					if (history.length > 5) {
-						history = history.slice(-5);
-					}
-				} else if (currentPct < lastVal) {
-					history = [currentPct];
-				}
-
-				this.sessionHistory = history;
-				this.sessionResetKey = resetsAt;
-				this._updateSessionTooltip();
-
-				try {
-					if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
-						chrome.storage.local.set({
-							[key]: { version: 2, resets_at: resetsAt, history }
-						});
-					}
-				} catch (e) {
-					// ignore storage errors
-				}
+			const load = { key, resetsAt, seq, pending: [currentPct] };
+			this._historyLoad = load;
+			const finish = (storedResetsAt, storedHistory) => {
+				if (this._historyLoad !== load || this._historySeq !== seq) return; // superseded
+				this._historyLoad = null;
+				const base = storedResetsAt === resetsAt && Array.isArray(storedHistory) ? storedHistory : [];
+				this._applyReadings(key, resetsAt, base, load.pending);
 			};
-
-			if (this.sessionResetKey !== resetsAt) {
-				this.sessionResetKey = resetsAt;
-				try {
-					if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
-						chrome.storage.local.get([key], (result) => {
-							const data = result?.[key];
-							processHistory(data?.version === 2 ? data.resets_at : null, data?.history);
-						});
-					} else {
-						processHistory(null, null);
-					}
-				} catch (e) {
-					processHistory(null, null);
+			try {
+				if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
+					chrome.storage.local.get([key], (result) => {
+						const data = result?.[key];
+						finish(data?.version === 2 ? data.resets_at : null, data?.history);
+					});
+				} else {
+					finish(null, null);
 				}
-			} else {
-				processHistory(resetsAt, this.sessionHistory);
+			} catch (e) {
+				finish(null, null);
+			}
+		}
+
+		/** Applies readings in order: a rise is appended (last 5 kept), a drop starts over. Saves once. */
+		_applyReadings(key, resetsAt, base, readings) {
+			let history = [...base];
+			for (const pct of readings) {
+				const last = history[history.length - 1];
+				if (!history.length || pct < last) history = [pct];
+				else if (pct > last) history = [...history, pct].slice(-5);
+			}
+			this.sessionHistory = history;
+			this.sessionResetKey = resetsAt;
+			this._updateSessionTooltip();
+			try {
+				if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
+					chrome.storage.local.set({ [key]: { version: 2, resets_at: resetsAt, history } });
+				}
+			} catch (e) {
+				// ignore storage errors
 			}
 		}
 
