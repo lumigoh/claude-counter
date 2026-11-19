@@ -99,12 +99,24 @@ A second independent review found that several targeted-review fixes added new t
   - S03/S06 move the clock before the response headers.
 - **Known limits, unchanged.**
   - A backward clock step can drop one reply poll.
-  - A reset time that goes A→B→A while B's history loads can save B's history.
   - An org switch during start-up can add one extra token recount.
-  - Without a cookie, a multi-org account whose list is slower than 2 s shows the remembered org until a candidate re-check or the cookie corrects it.
+  - Without a cookie, a multi-org account whose list is slower than 2 s shows the remembered org until the cookie corrects it (superseded by D1 below).
+
+### Simplification
+A review of the final round found one high and four medium issues. Following the stopping rule, the design was simplified instead of patched (see *Design rules* in `docs/architecture.md`):
+- **D1: no candidate re-checks.** After start-up, only the cookie or page setting switches the org. This fixes a stale re-check switching to the wrong org (high) and candidates being stranded or re-checked twice.
+  - Cost: without a cookie, a multi-org user who switches org needs a reload or the cookie.
+- **D2: one start-up decision.** Start-up runs once per page load with one org-list request and is never restarted, even after an inconclusive list.
+- **D3: one poll gate.** Every `/usage` request waits for start-up and for the org's snapshot step, then checks hidden tab, request in flight, backoff and freshness in one place. Fixes:
+  - a focus poll or a switch beating the snapshot;
+  - a double start-up poll;
+  - the expiry tick bypassing backoff.
+- **D4: fresh means both windows are live.** This applies everywhere, including on showing a hidden tab.
+- **D5: tooltip.** A new reset window hides the previous window's readings, and a reset time going R1→R2→R1 no longer saves the wrong history.
+- **Tests.** Re-check tests were replaced by D1 tests. M02d and O32b now test the real rule. New: O37–O45, M06f, U72, U73. Every gate check was confirmed by a mutant that a test catches.
 
 ### Validation
-- 196 automated tests pass (183 before the final round, 170 before the targeted-review fixes, 151 before the post-audit fixes).
+- 202 automated tests pass (196 before the simplification, 183 before the final round, 170 before the targeted-review fixes, 151 before the post-audit fixes).
 - Earlier post-audit validation: 170 automated tests passed.
 - Earlier 2.1.8 validation: 151 automated tests passed. New tests cover:
   - incidental organisation requests, genuine switches, A→B→A, and stale polls and streams

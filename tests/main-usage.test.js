@@ -91,14 +91,15 @@ test('M02c nothing is requested while the tab is hidden', async () => {
 	assert.equal(env.calls.usageRequests.length, 1);
 });
 
-test('M02d without a known organisation nothing can be asked, and it is retried each minute', async () => {
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
-	assert.equal(env.calls.usageRequests.length, 0);
+test('M02d without a known organisation nothing is asked; the first org found is polled at once (D2)', async () => {
+	let listRequests = 0;
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch: async () => { listRequests++; return { ok: false }; } });
 	await env.clock.advance(2 * MIN + 5000);
 	assert.equal(env.calls.usageRequests.length, 0);
+	assert.equal(listRequests, 1, 'start-up asked once and does not retry');
 	await env.emit('cc:org_detected', { orgId: ORG });
-	await env.clock.advance(MIN);
-	assert.equal(env.calls.usageRequests.length >= 1, true);
+	await env.clock.flush(); // no clock advance: acceptance itself polls
+	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [ORG]);
 });
 
 test('M03 limits from a reply: bars get the values, they are saved with the organisation, /usage is not needed', async () => {
@@ -241,6 +242,20 @@ test('M06e R6: a restore of an expired window does not shorten the failure backo
 	await env.clock.advance(50000); // the 10 s restore retry fills both windows
 	assert.equal(env.lastUsage().seven_day.utilization, 12);
 	assert.equal(env.calls.usageRequests.length, 1, 'still within the failure backoff');
+});
+
+test('M06f R6/D3: a restored window that expires later does not bypass the failure backoff', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: async () => { throw new Error('403'); } });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 1, 'the start-up poll fails: retry in 60 s');
+	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: liveWindow(30, START + 20000), seven_day: liveWindow(12, START + 24 * HOUR) } } });
+	await env.clock.advance(11000); // the restore retry fills both windows
+	assert.equal(env.lastUsage().five_hour.utilization, 30);
+	await env.clock.advance(30000); // the session window expires at 20 s
+	assert.equal(env.lastUsage().five_hour.expired, true);
+	assert.equal(env.calls.usageRequests.length, 1, 'the expiry waits for the backoff');
+	await env.clock.advance(25000);
+	assert.equal(env.calls.usageRequests.length, 2, 'then retries');
 });
 
 test('M07 /usage with nothing in it never wipes what is known or saved', async () => {
@@ -650,18 +665,20 @@ test('F17 switching back restores only that organisation quota, before its fresh
 });
 
 test('F18 delayed discovery from stored settings cannot overwrite an organisation the cookie named meanwhile', async () => {
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage });
-	const get = env.chrome.storage.local.get;
 	let finish;
-	env.chrome.storage.local.get = (keys, callback) => {
-		if (keys.includes('claude_last_org_id')) finish = finish || callback;
-		else get(keys, callback);
-	};
-	const done = env.calls.uiOpts.onUsageRefresh();
-	await env.clock.flush();
-	await switchOrg(env, OTHER_ORG);
+	const env = await createMainEnv({
+		startMs: START, usage: emptyUsage,
+		beforeStart: (e) => {
+			const get = e.chrome.storage.local.get;
+			e.chrome.storage.local.get = (keys, callback) => {
+				if (keys.includes('claude_last_org_id')) finish = finish || callback;
+				else get(keys, callback);
+			};
+		}
+	});
+	await switchOrg(env, OTHER_ORG); // the cookie appears while the remembered read is held
 	finish({ claude_last_org_id: ORG });
-	await done;
+	await env.clock.advance(3000);
 	assert.equal(env.calls.usageRequests.at(-1).orgId, OTHER_ORG);
 	assert.ok(env.calls.usageRequests.every((r) => r.orgId === OTHER_ORG));
 });

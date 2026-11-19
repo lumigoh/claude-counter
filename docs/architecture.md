@@ -42,31 +42,34 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 5. the account's only org,
 6. the first candidate seen.
 
-**Start-up rules.**
-- **One request.** Start-up makes at most one org-list request (R1). Concurrent callers share one start-up resolution.
-- **2 s limit.** The org list and the remembered org are read at the same time and share one 2-second limit. A read that hasn't answered by then counts as missing. A list that marks one org `active` is used at once, without waiting for the remembered org.
-- **Nothing to choose.** With no answer and no fallback, start-up keeps waiting on that same request until it answers, a candidate arrives, or the cookie tick accepts an org. Restores and polls never start their own start-up.
-- **No late correction.** Once start-up has chosen, it is over: a later list answer is ignored (R2). This is a deliberate trade-off. Without a cookie, a multi-org account whose list is slower than 2 s shows the remembered org until a candidate re-check or the cookie corrects it.
-- **Cookie wins.** A cookie that appears at any point wins, because trusted sources are read again after every wait.
+**Design rules (2.1.8 simplification).** Four review rounds showed that many triggers, each with its own guard, can't be made safe by patching. So the code is kept to four rules, and each test targets one of them.
 
-**Candidates** are IDs seen in requests (`cc:org_detected`). claude.ai also requests other organisations (for example team plus personal accounts), so a candidate never switches the active org on its own.
-
-**No-cookie re-check.** Without a cookie, a differing candidate triggers a re-check of the org list, at most every 5 minutes:
-- One flag records that a differing candidate was seen since the last re-check started reading (R5). It is cleared only when a re-check starts, so a candidate seen during the cooldown or an in-flight re-check always gets one more re-check, when the cooldown ends.
-- The list's answer is discarded if a trusted source spoke or the org changed while waiting.
-- If nothing trusted names another org, the current one stays.
+- **D1: after start-up, only a trusted source switches the org.** That means the cookie or the page setting, read every second by the tick and synchronously before a labelled event is dropped.
+  - A candidate (an org ID seen in a request, `cc:org_detected`) never switches a known org and never asks the org list. claude.ai requests other organisations too, such as team plus personal accounts.
+  - A candidate is only used while no org is known: start-up takes the first one seen, and after a start-up that found nothing, the next one becomes the org.
+  - Cost: without a cookie, a multi-org user who switches org keeps the start-up org until a reload or until the cookie appears.
+- **D2: one start-up decision per page load.**
+  - It runs once and settles within 2 s, with an org or with none. It makes exactly one org-list request. Callers wait for it but never restart it.
+  - The list and the remembered org are read at the same time and share the 2 s limit; a read that hasn't answered by then counts as missing.
+  - A list that marks one org `active` is used at once, without waiting for the remembered org.
+  - If start-up settles with none, a later list answer naming an active or sole org can still supply the *first* org. It never replaces one.
+  - A cookie that appears at any point wins, because trusted sources are read again after every wait.
+- **D3: one poll function behind one gate.** Every `/usage` request goes through `pollUsage`. That covers acceptance, page changes, focus, visibility, stream timers, the periodic tick, expiry, reply polls and the user's click. It runs in a fixed order:
+  1. Wait for start-up.
+  2. Wait for the org's **ready gate**, its snapshot restore, which is set on every acceptance. If another acceptance happened meanwhile (even back to the same org), stop: that acceptance polls for itself.
+  3. In one place, check hidden tab, request in flight, backoff and freshness. Only the user's click overrides backoff.
+- **D4: fresh means both windows are live.** A restored snapshot is shown at once but isn't fresh, because its age is unknown. If either window lacks a live reading, only the last poll answer counts as fresh.
 
 **A genuine switch** is a trusted source naming a different org. The 1-second tick notices cookie changes. On a switch:
 - memory and the screen are cleared,
 - the per-org snapshots on disk are kept,
-- in-flight polls are invalidated through revisions,
-- the new org's snapshot is restored and polled immediately.
+- in-flight polls are invalidated through revisions and the ready gate,
+- the new org's snapshot is restored, and then it is polled.
 
-**Snapshots and the start-up poll.** A restored snapshot is shown at once but doesn't count as fresh data, because its age is unknown.
-- Every first acceptance of an org restores its snapshot and then polls once. That poll shares the freshness gate with the page's own start-up poll, so there is one poll per page load.
-- The poll is skipped only when both windows already hold live readings (R4). A reply carrying only the session window doesn't count.
-- A restore needs a known org and never waits for start-up. Acceptance runs it (R3), and callers share the restore in flight for the same org, so a poll never lands before the snapshot is shown.
-- An expired snapshot asks for fresh data at once only if no poll has answered or failed yet. A restore never shortens a failure or free-plan backoff (R6).
+**Snapshots.**
+- Every acceptance restores the org's snapshot and polls once after it (D3). With the freshness rule (D4), that makes one poll per page load.
+- Callers share the restore in flight for the same org.
+- An expired snapshot asks for fresh data at once only if no poll has answered or failed yet. Backoff (failure, free plan) is checked in `pollUsage`, so neither a restore nor the expiry tick can shorten it.
 
 ## Accepting usage numbers
 
@@ -86,7 +89,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
   - Replay detection across reopened streams therefore needs the label. Without it, at most one extra recount can follow a reopen.
 - **Turn ends.** `cc:turn_end` carries the stream's label.
   - The token counter ignores one labelled with another org.
-  - Before the first org is accepted, it waits for the org instead of dropping the turn end.
+  - Before the first org is accepted, it waits for start-up (≤ 2 s). If start-up found no org, the token counter's first-org refresh recounts instead.
   - Unlabelled turn ends still recount: a recount always fetches the active org's current chat.
 - **Replay heuristic.** Event IDs start with the server's epoch milliseconds. A limits event more than 120 000 ms older than its stream's open time is a replay: its limits are delivered, but no turn end is sent. Two edges are known and accepted:
   - Reloading within 120 s of a reply treats that reply as live, so one extra recount can happen.
@@ -99,12 +102,12 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 The Session tooltip's "Recent readings" are stored per org and reset window (`claude_session_history:<org>`).
 - A window's saved history is loaded once. Readings that arrive while the load is pending are queued and applied on top of the saved history when it lands, then saved once.
 - A load belongs to one org and one window. Switching org, clearing, or a new window invalidates it, so a late read can't leak one org's readings into another's.
+- Starting a load for a different window hides the old window's readings until the new history lands (D5). A reset time going R1→R2→R1 therefore reloads R1.
 
 ## Known limits
 
 These are recorded rather than fixed, because a fix would add more code than the risk justifies:
 - **Clock step.** A backward system-clock step right after a poll can drop one unlabelled reply's poll. The next scheduled poll catches up.
-- **Reset A→B→A.** A session reset time that changes A→B→A while B's history is still loading can save B's history while A is shown.
 - **Extra recount.** A labelled turn end that waits through start-up, followed by a switch before its recount, can cause one extra recount for the new org.
 
 ## Keeping the bars in place
