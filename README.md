@@ -8,7 +8,7 @@ Fixes from an audit of 2.1.7 (tracked in [#1](https://github.com/lumigoh/claude-
 
 - **Organisations.** IDs seen in claude.ai's background requests no longer count as an organisation switch, so bars stop flickering and the live usage feed stays connected. Only a real switch, such as changing organisation in claude.ai, which updates its `lastActiveOrg` cookie, changes what is shown. See [How it works](docs/architecture.md#which-organisation-is-active).
 - **Claude Code.** The soft fade above the bars now also appears on Claude Code session pages (`/code/session_…`).
-- **Keyboard and screen readers.** Tab to Session or Weekly, press Enter or Space to refresh. Tooltips show on focus and are linked to their bars.
+- **Keyboard and screen readers.** Tab to Session or Weekly, press Enter or Space to refresh. Tooltips show on focus and are linked to their bars. In Claude Code, Tab jumps from the transcript straight into the message box, so use Shift+Tab from the message box instead ([#9](https://github.com/lumigoh/claude-counter/issues/9)).
 - **Spanish.** Spanish pages get fully translated tooltips.
 - **Smaller fixes.**
   - Lighter page observation while replies stream.
