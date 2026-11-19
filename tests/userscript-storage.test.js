@@ -39,3 +39,34 @@ test('userscript storage keeps working when the browser blocks localStorage', as
 	await local.set({ claude_last_org_id: 'org-2' });
 	assert.equal((await local.get('claude_last_org_id')).claude_last_org_id, 'org-2');
 });
+
+// #6: the userscript runs in the page world. If the page defines an AMD loader (define.amd) or
+// CommonJS-looking globals, the vendored tokenizer's UMD wrapper registers itself there instead of
+// creating the global the counter needs.
+function loadTokenizerSection(pageGlobals) {
+	const script = fs.readFileSync(path.join(__dirname, '../userscript/claude-counter.user.js'), 'utf8');
+	const start = script.indexOf('ClaudeCounter.loadUserscriptTokenizer = async () => {');
+	const end = script.indexOf('\nfunction start() {', start);
+	assert.ok(start > 0 && end > start, 'tokenizer section found');
+	const context = vm.createContext({ ClaudeCounter: {}, TextEncoder, TextDecoder, ...pageGlobals });
+	context.globalThis = context;
+	vm.runInContext(script.slice(start, end), context);
+	return context;
+}
+
+test('the userscript tokenizer creates its global even when the page defines an AMD loader', async () => {
+	const registered = [];
+	const define = (...args) => registered.push(args);
+	define.amd = {};
+	const context = loadTokenizerSection({ define });
+	await context.ClaudeCounter.loadUserscriptTokenizer();
+	assert.equal(typeof context.GPTTokenizer_o200k_base?.countTokens, 'function');
+	assert.equal(registered.length, 0, 'the page loader is left alone');
+	assert.equal(context.GPTTokenizer_o200k_base.countTokens('hello world'), 2);
+});
+
+test('the userscript tokenizer ignores CommonJS-looking page globals', async () => {
+	const context = loadTokenizerSection({ exports: {}, module: { exports: {} } });
+	await context.ClaudeCounter.loadUserscriptTokenizer();
+	assert.equal(typeof context.GPTTokenizer_o200k_base?.countTokens, 'function');
+});
