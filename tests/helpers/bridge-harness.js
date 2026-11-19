@@ -38,7 +38,10 @@ function createBridgeEnv({ originalFetch, location, cookie = '', nowMs } = {}) {
 	// Event IDs start with the server's epoch milliseconds and the bridge compares them with the
 	// time a stream opened (replay detection, #4). Tests replaying recorded frames pin "now" to
 	// just after the recording with `nowMs`, so those frames count as live replies.
-	const BridgeDate = nowMs === undefined ? Date : class extends Date { static now() { return nowMs; } };
+	// `nowMs` may also be a mutable clock `{ now }`, so a test can open a stream at one time and
+	// deliver its frames later (#17).
+	const readNow = typeof nowMs === 'object' ? () => nowMs.now : () => nowMs;
+	const BridgeDate = nowMs === undefined ? Date : class extends Date { static now() { return readNow(); } };
 	new Function('window', 'history', 'document', 'location', 'Date', source)(window, history, document, window.location, BridgeDate);
 
 	return {
