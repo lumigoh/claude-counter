@@ -60,6 +60,8 @@
 			this.setEnabled(CC.config?.showTokenCounter === true);
 		}
 
+		// Chat conversations only. Claude Code sessions (/code/<id>) are not chat_conversations and
+		// cannot be fetched and counted the same way, so the counter stays hidden there (#7).
 		_chatId() {
 			return window.location.pathname.match(/\/chat\/([^/?]+)/)?.[1] || null;
 		}

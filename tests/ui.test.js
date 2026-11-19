@@ -356,3 +356,29 @@ test('U63 Spanish pages get whole tooltips and token texts in Spanish, not just 
 	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'error' });
 	assert.equal(env.ui.tokenDisplay.textContent, 'Tokens no disponibles');
 });
+
+// #7: the soft fade above the bars belongs to ongoing conversations, in Chat and in Claude Code.
+function fadeOn(pathname, { rowTop = 500 } = {}) {
+	const env = createUiEnv({ pathname });
+	env.dom.buildComposer();
+	env.ui.attach();
+	env.ui.usageLine.getBoundingClientRect = () => ({ left: 200, right: 840, width: 640, top: rowTop, bottom: rowTop + 24, height: 24 });
+	env.ui.tick();
+	return env.ui.composerFade;
+}
+
+test('U64 the fade shows above the bars in Chat and Claude Code conversations', () => {
+	for (const path of ['/chat/d017d8c7-6458-4449-884f-64980589c699', '/code/session_01PWd9m9bo3k1fLhqDAJHu8w']) {
+		const fade = fadeOn(path);
+		assert.equal(fade.style.display, 'block', path);
+		assert.equal(fade.style.top, '460px', `${path}: 40px above the row`);
+		assert.equal(fade.style.height, '40px', path);
+	}
+});
+
+test('U65 the fade stays hidden on pages without a transcript and when the bars are off-screen', () => {
+	for (const path of ['/', '/new', '/code', '/code/', '/code/new', '/projects']) {
+		assert.equal(fadeOn(path).style.display, 'none', path);
+	}
+	assert.equal(fadeOn('/code/session_01PWd9m9bo3k1fLhqDAJHu8w', { rowTop: 900 }).style.display, 'none', 'row below the viewport');
+});

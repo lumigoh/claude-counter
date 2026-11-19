@@ -48,6 +48,16 @@
 				tokenTip: 'Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.'
 			};
 
+	/**
+	 * Whether the page shows an ongoing conversation, so a transcript can scroll behind the bars and
+	 * the soft fade above them is useful (#7). Chat conversations live at /chat/<id>, Claude Code
+	 * sessions at /code/<id> (e.g. /code/session_01...). Landing pages with no transcript (/, /new,
+	 * /code, /code/new, projects) are excluded so the fade never tints an empty screen.
+	 */
+	function isConversationPage(pathname) {
+		return /^\/(?:chat|code)\/(?!new(?:[/?#]|$))[^/?#]+/.test(pathname || '');
+	}
+
 	function formatResetCountdown(timestampMs) {
 		// <= 0: reset time reached
 		const diffMs = timestampMs - Date.now();
@@ -264,8 +274,7 @@
 			const fade = this.composerFade;
 			if (!fade) return;
 			const row = this.usageLine;
-			const isChat = /\/chat\/[^/]+/.test(window.location?.pathname || '');
-			if (!isChat || !row?.isConnected || !row.getClientRects().length) {
+			if (!isConversationPage(window.location?.pathname) || !row?.isConnected || !row.getClientRects().length) {
 				fade.style.display = 'none';
 				return;
 			}
@@ -692,5 +701,5 @@
 		}
 	}
 
-	CC.ui = { CounterUI };
+	CC.ui = { CounterUI, isConversationPage };
 })();
