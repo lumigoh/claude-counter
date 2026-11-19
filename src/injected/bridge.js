@@ -27,7 +27,8 @@
 	//     time, or null when it is unreadable.
 	function cookieOrgId() {
 		try {
-			return (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1] || null;
+			const id = (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1];
+			return isPlausibleOrgId(id) ? id : null;
 		} catch {
 			return null;
 		}
@@ -36,6 +37,9 @@
 		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now() };
 	}
 	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
+
+	// Same check as CC.isPlausibleOrgId in src/content/constants.js (#5); keep the two in sync.
+	const isPlausibleOrgId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(id) && /\d/.test(id);
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -65,12 +69,11 @@
 		}
 
 		// Detect and broadcast active orgId from any Claude API requests
-		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
-		if (orgMatch && orgMatch[1]) {
-			post('cc:org_detected', { orgId: orgMatch[1] });
-		}
+		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/?#]+)/);
+		const requestOrgId = isPlausibleOrgId(orgMatch?.[1]) ? orgMatch[1] : null;
+		if (requestOrgId) post('cc:org_detected', { orgId: requestOrgId });
 
-		const scope = streamScope(orgMatch?.[1] || null);
+		const scope = streamScope(requestOrgId);
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
@@ -539,7 +542,7 @@
 			if (kind === 'usage') {
 				const orgId = payload?.orgId;
 				if (!orgId) throw new Error('Missing orgId');
-				const res = await originalFetch(`https://claude.ai/api/organizations/${orgId}/usage`, {
+				const res = await originalFetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
 					method: 'GET',
 					credentials: 'include'
 				});
@@ -554,7 +557,7 @@
 				const conversationId = payload?.conversationId;
 				if (!orgId || !conversationId) throw new Error('Missing orgId/conversationId');
 
-				const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=true&rendering_mode=messages&render_all_tools=true`;
+				const url = `https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/chat_conversations/${encodeURIComponent(conversationId)}?tree=true&rendering_mode=messages&render_all_tools=true`;
 				const res = await originalFetch(url, {
 					method: 'GET',
 					credentials: 'include'

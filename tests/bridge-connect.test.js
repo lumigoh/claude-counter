@@ -463,7 +463,7 @@ test('F12 organisations keep separate cursors; an old stream keeps its own label
 	// lastActiveOrg cookie at open time; main.js drops messages whose label is not the active org.
 	let oldController;
 	let openOld = true;
-	const env = createBridgeEnv({ cookie: 'lastActiveOrg=org-a', originalFetch: async (url) => {
+	const env = createBridgeEnv({ cookie: 'lastActiveOrg=org-a-0001', originalFetch: async (url) => {
 		if (!String(url).includes('StreamTimeline')) return new Response('{}');
 		if (openOld) {
 			openOld = false;
@@ -472,12 +472,12 @@ test('F12 organisations keep separate cursors; an old stream keeps its own label
 		return streamResponse([quotaFrame('2000-1', [['5h', 1, 1791749400, 0.1]])]);
 	} });
 	const old = await env.fetch(STREAM_URL, { method: 'POST' }); await settle();
-	env.document.cookie = 'lastActiveOrg=org-b';
+	env.document.cookie = 'lastActiveOrg=org-b-0002';
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
 	oldController.enqueue(quotaFrame('3000-1', [['5h', 1, 1791749400, 0.41]])); oldController.close();
 	await readAll(old); await settle();
 	const sent = env.messages.filter((m) => m.type === 'cc:message_limit').map((m) => [m.meta.orgId, m.payload.windows['5h'].utilization]);
-	assert.deepEqual(sent, [['org-a', 0.4], ['org-b', 0.1], ['org-a', 0.41]], 'the same cursor in org-b is not a replay of org-a');
+	assert.deepEqual(sent, [['org-a-0001', 0.4], ['org-b-0002', 0.1], ['org-a-0001', 0.41]], 'the same cursor in org-b-0002 is not a replay of org-a-0001');
 });
 
 test('F13 missing or slightly changed future reset times cannot bypass a newer cursor', async () => {
