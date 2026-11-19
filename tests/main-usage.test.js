@@ -646,3 +646,32 @@ test('F19 an enabled token count discards a previous organisation response too',
 	await old;
 	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 25);
 });
+
+// ---- #4: the optional token counter refreshes only on real changes -------------------------------
+
+test('M28 history events that keep the same chat do not refetch the conversation', async () => {
+	const env = await createMainEnv({ storage: orgStored, showTokenCounter: true, conversations: { [CONV]: { chat_messages: [{}], fakeTokens: 5 } }, startMs: START, usage: emptyUsage });
+	const before = env.calls.conversationRequests.length;
+	for (let i = 0; i < 3; i++) await env.navigate(`/chat/${CONV}`);
+	env.window.dispatchEvent({ type: 'popstate' });
+	await env.clock.flush();
+	assert.equal(env.calls.conversationRequests.length, before);
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 5, 'the count stays on screen');
+});
+
+test('M29 a different chat, a branch switch and a finished reply still recount', async () => {
+	const OTHER_CHAT = '11111111-2222-4333-8444-555555555555';
+	const env = await createMainEnv({ storage: orgStored, showTokenCounter: true, conversations: { [CONV]: { chat_messages: [{}], fakeTokens: 5 }, [OTHER_CHAT]: { chat_messages: [{}], fakeTokens: 9 } }, startMs: START, usage: emptyUsage });
+	let count = env.calls.conversationRequests.length;
+	await env.navigate(`/chat/${OTHER_CHAT}`);
+	assert.equal(env.calls.conversationRequests.length, ++count, 'chat change');
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 9);
+	env.document.dispatchEvent({ type: 'click', target: { closest: () => ({}) } });
+	await env.clock.advance(600);
+	assert.equal(env.calls.conversationRequests.length, ++count, 'branch switch');
+	await env.emit('cc:turn_end', {});
+	await env.clock.advance(1300);
+	assert.equal(env.calls.conversationRequests.length, ++count, 'finished reply');
+	await env.navigate(`/chat/${CONV}`);
+	assert.equal(env.calls.conversationRequests.length, ++count, 'back to the first chat');
+});

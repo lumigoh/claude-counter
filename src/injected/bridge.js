@@ -436,9 +436,8 @@
 	// Replay and ordering protection. Both maps are keyed by the stream's organisation label, so
 	// organisations never share cursors, and a stream opened under A stays valid after the user
 	// visits B and comes back (the old global epoch counter silenced it for good).
-	function freshLimits(bytes, limits, scope) {
+	function freshLimits(id, limits, scope) {
 		const orgKey = scope.orgId || '';
-		const id = eventIdOf(bytes);
 		const seenKey = JSON.stringify([orgKey, id]);
 		if (id && seenEventIds.has(seenKey)) return null;
 		if (id) {
@@ -474,11 +473,25 @@
 			if (!bytes) return;
 		}
 		const parsed = extractLimits(bytes);
-		const limits = parsed && freshLimits(bytes, parsed, scope);
-		if (limits) {
-			post('cc:message_limit', limits, scopeMeta(scope));
-			post('cc:turn_end', {});
-		}
+		if (!parsed) return;
+		const id = eventIdOf(bytes);
+		const limits = freshLimits(id, parsed, scope);
+		if (!limits) return;
+		post('cc:message_limit', limits, scopeMeta(scope));
+		// Only a reply that finished while this stream was open is a turn end. When a stream (re)opens
+		// the server may first send the latest limits event again; its id is older than the stream.
+		// Those limits still update the bars, but announcing a turn would make the optional token
+		// counter recount for nothing (#4).
+		if (!isReplayedEvent(id, scope)) post('cc:turn_end', {});
+	}
+
+	// Event ids start with the server's epoch milliseconds. Allow for the user's clock being ahead
+	// of the server's: only an event clearly older than the stream counts as a replay.
+	const REPLAY_CLOCK_ALLOWANCE_MS = 2 * 60 * 1000;
+	function isReplayedEvent(id, scope) {
+		const cursor = parsedCursor(id);
+		if (!cursor || !Number.isFinite(scope?.openedAt)) return false;
+		return Number(cursor[0]) < scope.openedAt - REPLAY_CLOCK_ALLOWANCE_MS;
 	}
 
 	async function handleConnectStream(response, scope) {

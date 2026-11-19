@@ -21,9 +21,14 @@ test.afterEach(() => {
 	assert.deepEqual(unhandled.splice(0), [], 'unhandled rejection');
 });
 
-async function runStream(chunks, { contentType } = {}) {
+// The stream "opens" just after the reply limits_5h_first (1791743967525-0) was recorded, so it and
+// the later limits_5h_first_turn2 count as live replies rather than replays (#4).
+const RECORDED_NOW = 1791743968000;
+
+async function runStream(chunks, { contentType, nowMs = RECORDED_NOW } = {}) {
 	let response;
 	const env = createBridgeEnv({
+		nowMs,
 		originalFetch: async () => {
 			response = streamResponse(chunks, { contentType });
 			return response;
@@ -190,6 +195,7 @@ test('T10b the same event sent again (stream reopened) is not a new reply, a new
 	// same event twice in one stream, and again in a second stream of the same page
 	let response;
 	const env = createBridgeEnv({
+		nowMs: RECORDED_NOW,
 		originalFetch: async () => {
 			response = streamResponse([frame('limits_5h_first'), frame('limits_5h_first')]);
 			return response;
@@ -438,7 +444,7 @@ test('F10 stream freshness is independent for session, weekly, and reset windows
 		quotaFrame('2000-10', [['5h', 1, 1791749400, 0.4]]),
 		quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39], ['7d', 1, 1791990000, 0.2]]),
 		quotaFrame('500-1', [['5h', 1, 1791849400, 0.01]])
-	]);
+	], { nowMs: Date.now() }); // real time: the first recorded 5h window has already reset
 	assert.deepEqual(Object.keys(limits(env)[1].windows), ['7d']);
 	assert.equal(limits(env)[2].windows['5h'].utilization, 0.01, 'a different reset window has its own watermark');
 });
@@ -482,4 +488,18 @@ test('F13 missing or slightly changed future reset times cannot bypass a newer c
 		proto.connectFrame(0, proto.encodeFields([[1, 'm', [[10, 'm', [[1, 's', '1000-1']]], [11, 'v', 2], [4, 'm', [[13, 'm', [[1, 's', '5h'], [2, 'm', [[3, 'd', 0.38]]]]]]]]]]))
 	]);
 	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4]);
+});
+
+test('T16 a limits event older than its stream is a replay: limits are delivered, no turn end (#4)', async () => {
+	const opened = 1791744121000;
+	const old = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened - 10 * 60 * 1000}-0`, windows: [['5h', 1, 1791749400, 0.5]] }));
+	const live = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened + 30 * 1000}-0`, windows: [['5h', 1, 1791749400, 0.51]] }));
+	const skewed = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened - 30 * 1000}-1`, windows: [['7d', 1, 1791990000, 0.2]] }));
+	const { env } = await runStream([old], { nowMs: opened });
+	assert.equal(limits(env).length, 1, 'the replayed snapshot still updates the bars');
+	assert.equal(env.events('cc:turn_end').length, 0, 'but it is not a finished reply');
+	const { env: env2 } = await runStream([old, live], { nowMs: opened });
+	assert.equal(env2.events('cc:turn_end').length, 1, 'a reply newer than the stream is');
+	const { env: env3 } = await runStream([skewed], { nowMs: opened });
+	assert.equal(env3.events('cc:turn_end').length, 1, 'small clock differences are tolerated');
 });
