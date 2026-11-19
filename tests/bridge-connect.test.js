@@ -413,7 +413,8 @@ test('T15b conversation request: a real conversation is delivered and answered',
 	await settle(30);
 	const reply = env.messages.find((m) => m.type === 'cc:response' && m.requestId === id);
 	assert.equal(reply.ok, true);
-	assert.equal(env.events('cc:conversation').length, 1);
+	assert.deepEqual(reply.payload, body, 'the conversation reaches the requester in the response');
+	assert.equal(env.events('cc:conversation').length, 0, 'it is not broadcast a second time (#6)');
 });
 
 test('T57 Request objects retain POST generation detection and top-level SSE limits are read', async () => {

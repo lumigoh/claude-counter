@@ -671,7 +671,9 @@ const chrome = (() => {
 				if (!json || !(json.chat_messages || json.uuid || json.current_leaf_message_uuid)) {
 					throw new Error('Not a conversation');
 				}
-				post('cc:conversation', { orgId, conversationId, data: json });
+				// Only the requester gets the conversation. It used to be broadcast as well
+				// (cc:conversation), which nothing listened to and cost a second structured clone of
+				// a possibly very large object (#6).
 				postResponse(requestId, true, json, null);
 				return;
 			}

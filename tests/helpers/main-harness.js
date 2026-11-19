@@ -35,9 +35,7 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 		},
 		async requestConversation(orgId, conversationId) {
 			calls.conversationRequests.push({ at: clock.now, orgId, conversationId });
-			const data = await answers.conversation(orgId, conversationId);
-			if (data) await emit('cc:conversation', { orgId, conversationId, data });
-			return data;
+			return answers.conversation(orgId, conversationId);
 		},
 		async requestHash() {
 			return null;
