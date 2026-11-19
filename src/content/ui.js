@@ -207,8 +207,7 @@
 			return {
 				strokeColor: isDark ? CC.COLORS.PROGRESS_OUTLINE_DARK : CC.COLORS.PROGRESS_OUTLINE_LIGHT,
 				fillColor: isDark ? CC.COLORS.PROGRESS_FILL_DARK : CC.COLORS.PROGRESS_FILL_LIGHT,
-				markerColor: isDark ? CC.COLORS.PROGRESS_MARKER_DARK : CC.COLORS.PROGRESS_MARKER_LIGHT,
-				boldColor: isDark ? CC.COLORS.BOLD_DARK : CC.COLORS.BOLD_LIGHT
+				markerColor: isDark ? CC.COLORS.PROGRESS_MARKER_DARK : CC.COLORS.PROGRESS_MARKER_LIGHT
 			};
 		}
 
@@ -635,7 +634,6 @@
 			this.weeklyBar.classList.remove('cc-hidden');
 
 			const session = this._renderWindow({
-				label: 'Session',
 				windowMs: 5 * 60 * 60 * 1000,
 				w: usage?.five_hour || null,
 				pctSpan: this.sessionPctSpan,
@@ -647,7 +645,6 @@
 			this._updateSessionHistory(session.live && usage.five_hour.resets_at ? usage.five_hour.resets_at : null, session.pct);
 
 			const weekly = this._renderWindow({
-				label: 'Weekly',
 				windowMs: 7 * 24 * 60 * 60 * 1000,
 				w: usage?.seven_day || null,
 				pctSpan: this.weeklyPctSpan,
