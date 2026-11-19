@@ -605,3 +605,29 @@ test('O28b a start-up still waiting for the list resolves when the cookie tick a
 	assert.equal(env.calls.tokenStates.at(-1)?.totalTokens, 20);
 	assert.equal(fetch.calls(), 1, 'the stalled list is never asked again');
 });
+
+test('O36 R5: every differing candidate seen during an in-flight re-check gets one later re-check (A7)', async () => {
+	const answers = [];
+	let held = null;
+	let listRequests = 0;
+	const fetch = async () => {
+		listRequests++;
+		const next = answers.shift();
+		if (next === 'hold') return new Promise((resolve) => { held = resolve; });
+		return { ok: true, json: async () => next };
+	};
+	answers.push([{ uuid: ORG, active: true }, { uuid: B }, { uuid: C }]); // start-up
+	answers.push('hold'); // re-check started by B
+	answers.push([{ uuid: ORG }, { uuid: B }, { uuid: C, active: true }]); // the later re-check
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.emit('cc:org_detected', { orgId: B });
+	await env.emit('cc:org_detected', { orgId: C });
+	await env.emit('cc:org_detected', { orgId: B }); // the latest candidate is B again
+	held({ ok: true, json: async () => [{ uuid: ORG }, { uuid: B, active: true }, { uuid: C }] });
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), B);
+	await env.clock.advance(5 * MIN + 1000);
+	assert.equal(env.stored('claude_last_org_id'), C, 'C was not lost');
+	await env.clock.advance(30 * MIN);
+	assert.equal(listRequests, 3, 'and no further re-checks without new candidates');
+});

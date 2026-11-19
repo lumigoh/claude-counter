@@ -2185,14 +2185,14 @@ function start() {
 
 	// Without a cookie, a candidate that differs from the active org asks the org list again, at most
 	// once per ORG_RECHECK_MS, and switches only if the list explicitly marks another org active.
-	// A differing candidate seen during the cooldown is not lost: one re-check runs at expiry (A7).
+	// One flag carries "a differing candidate has been seen since the last re-check started its list
+	// read" (R5, A7): it is set on arrival and cleared only when a re-check starts reading. A re-check
+	// in flight or in the cooldown therefore cannot lose a candidate, whatever arrives after it.
 	const ORG_RECHECK_MS = 5 * 60 * 1000;
 	let lastOrgRecheckMs = -Infinity;
 	let orgRecheckInFlight = false;
 	let orgRecheckTimer = null;
-	let pendingCandidateOrgId = null;
-	// A differing candidate seen while a re-check is in flight is re-checked afterwards (A7, #15).
-	let recheckAgain = false;
+	let uncheckedCandidate = false;
 
 	async function recheckActiveOrg() {
 		const trusted = readTrustedOrgSync();
@@ -2200,22 +2200,20 @@ function start() {
 			acceptActiveOrg(trusted);
 			return;
 		}
-		if (orgRecheckInFlight) {
-			recheckAgain = true;
-			return;
-		}
+		if (orgRecheckInFlight) return; // its `finally` sees the flag
 		const now = Date.now();
 		const waitMs = lastOrgRecheckMs + ORG_RECHECK_MS - now;
 		if (waitMs > 0) {
 			if (!orgRecheckTimer) {
 				orgRecheckTimer = setTimeout(() => {
-					orgRecheckTimer = null;
-					if (pendingCandidateOrgId && pendingCandidateOrgId !== currentOrgId) recheckActiveOrg().catch(() => {});
+					orgRecheckTimer = null; // only ever set while the flag is on
+					recheckActiveOrg().catch(() => {});
 				}, waitMs);
 			}
 			return;
 		}
 		lastOrgRecheckMs = now;
+		uncheckedCandidate = false;
 		orgRecheckInFlight = true;
 		const revision = orgRevision;
 		try {
@@ -2225,11 +2223,8 @@ function start() {
 			if (list?.active) acceptActiveOrg(list.active);
 		} finally {
 			orgRecheckInFlight = false;
-			if (recheckAgain) {
-				recheckAgain = false;
-				// Within the cooldown this schedules one re-check at expiry.
-				if (pendingCandidateOrgId && pendingCandidateOrgId !== currentOrgId) recheckActiveOrg().catch(() => {});
-			}
+			// Within the cooldown this schedules one re-check at expiry.
+			if (uncheckedCandidate) recheckActiveOrg().catch(() => {});
 		}
 	}
 
@@ -2242,7 +2237,7 @@ function start() {
 			wakeBootstrap?.();
 			getOrgId().catch(() => {});
 		} else if (orgId !== currentOrgId) {
-			pendingCandidateOrgId = orgId;
+			uncheckedCandidate = true;
 			recheckActiveOrg().catch(() => {});
 		}
 	}
