@@ -174,22 +174,33 @@ test('O11 an org list that marks one org active beats the remembered org at star
 	assert.equal(env.stored('claude_last_org_id'), ORG);
 });
 
-test('O12 a re-check answer that arrives after the cookie named another org is discarded (A3)', async () => {
+test('O12a a re-check answer is discarded when a trusted source spoke meanwhile, before any switch (A3, #15)', async () => {
 	const fetch = heldFetch();
 	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
 	fetch.fail(); // start-up list request
 	await env.clock.flush();
-	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
 	await env.emit('cc:org_detected', { orgId: B }); // starts a re-check
-	assert.equal(fetch.calls(), 1);
-	env.document.cookie = `lastActiveOrg=${C}`;
-	await env.clock.advance(1000);
-	await env.clock.flush();
+	env.document.cookie = `lastActiveOrg=${C}`; // no tick yet: the revision is unchanged
 	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
-	await env.clock.advance(3000);
+	await env.clock.flush();
+	assert.ok(!env.calls.orgs.includes(B), 'the stale list answer never became active');
+	await env.clock.advance(1000);
 	assert.equal(env.stored('claude_last_org_id'), C);
-	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === B).length, 0, 'the stale answer never became active');
-	assert.equal(env.calls.usageRequests.at(-1).orgId, C);
+});
+
+test('O12b a re-check answer is discarded when the org changed meanwhile, even with no trusted source now (A3, #15)', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
+	fetch.fail();
+	await env.clock.flush();
+	await env.emit('cc:org_detected', { orgId: B });
+	env.document.cookie = `lastActiveOrg=${C}`;
+	await env.clock.advance(1000); // the tick accepts C: the revision changes
+	env.document.cookie = ''; // and the cookie is unreadable again
+	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
+	await env.clock.flush();
+	assert.ok(!env.calls.orgs.includes(B));
+	assert.equal(env.stored('claude_last_org_id'), C);
 });
 
 test('O13 concurrent start-up resolution shares one org list request and uses the first candidate (A4)', async () => {
@@ -248,7 +259,9 @@ test('O17 an event labelled with the newly chosen org is applied within the tick
 // ---- 2.1.8 post-audit B (#11): unlabelled limits are never applied or saved -----------------------
 
 test('O18 an unlabelled reading is neither shown nor saved under the active org; it only prompts a poll (B1)', async () => {
-	const env = await createMainEnv({ storage: scoped(ORG, 40), cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+	// A paid plan: /usage answers with the org's own value, so a reply poll is not under free-plan backoff.
+	const paid = async () => ({ five_hour: liveWindow(40, START + HOUR), seven_day: null });
+	const env = await createMainEnv({ storage: scoped(ORG, 40), cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: paid });
 	await env.clock.advance(6000);
 	const before = env.calls.usageRequests.length;
 	await env.emit('cc:message_limit', limitsEvent(START, { fiveH: [0.77, 3600], sevenD: null }), { orgId: null, openedAt: START });
@@ -258,7 +271,7 @@ test('O18 an unlabelled reading is neither shown nor saved under the active org;
 	assert.equal(env.stored(`claude_usage_state:${ORG}`).usage.five_hour.utilization, 40, 'not saved under the active org');
 	assert.equal(env.calls.usageRequests.length, before + 1, 'one org-scoped poll instead');
 	assert.equal(env.calls.usageRequests.at(-1).orgId, ORG);
-	const reloaded = await createMainEnv({ storage: env.storageData, cookie: `lastActiveOrg=${ORG}`, startMs: START + MIN, usage: emptyUsage });
+	const reloaded = await createMainEnv({ storage: env.storageData, cookie: `lastActiveOrg=${ORG}`, startMs: START + MIN, usage: paid });
 	assert.equal(reloaded.lastUsage().five_hour.utilization, 40, 'and still not after a reload');
 });
 
@@ -340,4 +353,73 @@ test('O22 a late poll of the previous org cannot pass as a new window after the 
 	await env.clock.flush();
 	assert.notEqual(env.lastUsage()?.five_hour?.utilization, 55, 'the old org reading never reaches the new org');
 	assert.notEqual(env.stored(`claude_usage_state:${B}`)?.usage?.five_hour?.utilization, 55, 'nor its saved snapshot');
+});
+
+// ---- targeted review (#15): bootstrap never blocks on the network; candidates are not lost ------
+
+test('O23 a stalled org list does not block start-up: the remembered org shows after 2 s and a late list can correct it (A2)', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG, ...scoped(ORG, 40) }, startMs: START, usage: emptyUsage, fetch });
+	assert.equal(env.calls.usageRequests.length, 0, 'nothing chosen while the list may still answer');
+	await env.clock.advance(2000);
+	assert.equal(env.lastUsage().five_hour.utilization, 40, 'the remembered org snapshot shows');
+	assert.equal(env.calls.usageRequests.at(-1)?.orgId, ORG, 'and is confirmed by a poll');
+	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]); // the list finally answers
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), B, 'its trusted answer corrects the fallback');
+	assert.equal(env.calls.usageRequests.at(-1).orgId, B);
+});
+
+test('O24 a cookie that appears while the start-up list is pending beats the list answer (A3)', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: emptyUsage, fetch });
+	env.document.cookie = `lastActiveOrg=${C}`; // no tick yet
+	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), C);
+	assert.ok(!env.calls.orgs.includes(B));
+	assert.ok(env.calls.usageRequests.every((r) => r.orgId === C));
+});
+
+test('O25 a candidate seen while a re-check is in flight is re-checked at cooldown expiry (A7)', async () => {
+	const answers = [];
+	let held = null;
+	const fetch = async () => {
+		const next = answers.shift();
+		if (next === 'hold') return new Promise((resolve) => { held = resolve; });
+		return { ok: true, json: async () => next };
+	};
+	answers.push([{ uuid: ORG, active: true }, { uuid: B }, { uuid: C }]); // start-up
+	answers.push('hold'); // re-check started by B
+	answers.push([{ uuid: ORG }, { uuid: B }, { uuid: C, active: true }]); // the later re-check
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	await env.emit('cc:org_detected', { orgId: B });
+	await env.emit('cc:org_detected', { orgId: C }); // the user moved to C, no cookie
+	held({ ok: true, json: async () => [{ uuid: ORG, active: true }, { uuid: B }, { uuid: C }] }); // the old selection
+	await env.clock.flush();
+	assert.equal(env.stored('claude_last_org_id'), ORG);
+	await env.clock.advance(5 * MIN + 1000);
+	assert.equal(env.stored('claude_last_org_id'), C, 'C was not lost');
+});
+
+test('O27 a candidate bootstrap with a complete snapshot still polls at once (A5)', async () => {
+	const both = { [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: liveWindow(40, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) } } };
+	const env = await createMainEnv({ storage: both, startMs: START, usage: emptyUsage });
+	await env.emit('cc:org_detected', { orgId: ORG });
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 40);
+	assert.equal(env.calls.usageRequests.filter((r) => r.orgId === ORG).length, 1);
+});
+
+test('O29 a switch while a restore is still reading storage restores the new org too (#15)', async () => {
+	const env = await createMainEnv({ storage: { ...scoped(ORG, 40), ...scoped(B, 7) }, cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage });
+	const get = env.chrome.storage.local.get;
+	const held = [];
+	env.chrome.storage.local.get = (keys, cb) => held.push(() => get(keys, cb));
+	await env.clock.advance(11000); // past start-up; storage reads are now held
+	env.document.cookie = `lastActiveOrg=${B}`;
+	await env.clock.advance(1000);
+	while (held.length) { held.shift()(); await env.clock.flush(); }
+	assert.equal(env.lastUsage().five_hour.utilization, 7);
 });

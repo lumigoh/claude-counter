@@ -120,13 +120,14 @@ test('M03 limits from a reply: bars get the values, they are saved with the orga
 	assert.equal(env.calls.usageRequests.length, before, 'fresh limits postpone the hourly refresh');
 });
 
-test('M04 saved usage is restored on load, no request needed', async () => {
+test('M04 saved usage is restored on load at once, then confirmed by one request (#15)', async () => {
 	const saved = { orgId: ORG, usage: { five_hour: liveWindow(33, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) } };
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
 	const u = env.lastUsage();
 	assert.equal(u.five_hour.utilization, 33);
 	assert.equal(u.seven_day.utilization, 12);
-	assert.equal(env.calls.usageRequests.length, 0);
+	// A snapshot's age is unknown, so one poll per page load confirms it (owner decision, #15).
+	assert.equal(env.calls.usageRequests.length, 1);
 });
 
 test('M04b the organisation cookie is not needed (it may be unreadable): the old code needed it', async () => {
@@ -187,7 +188,7 @@ test('M05b both windows can end, and a new reply starts a fresh window', async (
 	assert.equal(Math.round(u.seven_day.utilization), 30);
 });
 
-test('M06 saved usage whose window ended while the page was closed shows 0%, and fresh data is asked for at once', async () => {
+test('M06 saved usage whose window ended while the page was closed shows 0% first, and fresh data is asked for at once', async () => {
 	const saved = { orgId: ORG, usage: { five_hour: liveWindow(71, START - HOUR), seven_day: liveWindow(12, START + 24 * HOUR) } };
 	// a paid plan: /usage knows the real value (used elsewhere, e.g. in another app)
 	const env = await createMainEnv({
@@ -195,22 +196,21 @@ test('M06 saved usage whose window ended while the page was closed shows 0%, and
 		startMs: START,
 		usage: async () => ({ five_hour: { utilization: 63, resets_at: new Date(START + 4 * HOUR).toISOString() }, seven_day: null })
 	});
-	const first = env.lastUsage();
-	assert.deepEqual(first.five_hour, { expired: true });
+	const first = env.calls.setUsage.find(Boolean);
+	assert.deepEqual(first.five_hour, { expired: true }, 'the snapshot shows the ended window as 0% first');
 	assert.equal(first.seven_day.utilization, 12);
-	assert.equal(env.calls.usageRequests.length, 0);
-
+	// Start-up confirms a restored snapshot with one poll (#15), so the fresh value arrives at once.
 	await env.clock.advance(2000);
-	assert.equal(env.calls.usageRequests.length, 1, 'asked on the first tick, not after an hour');
+	assert.equal(env.calls.usageRequests.length, 1, 'asked once at start-up, not after an hour');
 	assert.equal(env.lastUsage().five_hour.utilization, 63);
 	assert.equal(env.lastUsage().seven_day.utilization, 12);
 });
 
-test('M06b saved usage that is still live does not trigger a request', async () => {
+test('M06b saved usage that is still live is confirmed once, not polled repeatedly (#15)', async () => {
 	const saved = { orgId: ORG, usage: { five_hour: liveWindow(10, START + HOUR), seven_day: liveWindow(12, START + 24 * HOUR) } };
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
 	await env.clock.advance(30 * MIN);
-	assert.equal(env.calls.usageRequests.length, 0);
+	assert.equal(env.calls.usageRequests.length, 1, 'one start-up confirmation; the empty answer then holds the hourly cooldown');
 });
 
 test('M06c on the free plan the stale restore asks once and then waits an hour', async () => {
@@ -219,6 +219,18 @@ test('M06c on the free plan the stale restore asks once and then waits an hour',
 	await env.clock.advance(30 * MIN);
 	assert.equal(env.calls.usageRequests.length, 1);
 	assert.deepEqual(env.lastUsage().five_hour, { expired: true });
+});
+
+test('M06d a later restore (another tab saved a window) does not undo the free-plan hourly backoff (#15)', async () => {
+	const saved = { orgId: ORG, usage: { five_hour: liveWindow(71, START - HOUR), seven_day: null } };
+	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 1, 'start-up confirmation; the empty answer starts the hourly backoff');
+	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: { expired: true }, seven_day: liveWindow(12, START + 24 * HOUR) } } });
+	await env.clock.advance(11000); // the start-up restore retry fills the weekly window
+	assert.equal(env.lastUsage().seven_day.utilization, 12);
+	await env.clock.advance(30 * MIN);
+	assert.equal(env.calls.usageRequests.length, 1, 'still within the hourly backoff');
 });
 
 test('M07 /usage with nothing in it never wipes what is known or saved', async () => {
@@ -600,13 +612,13 @@ test('F15 a previously mixed legacy snapshot is rejected even when its primary o
 	assert.equal(env.calls.usageRequests.length, 1);
 });
 
-test('F16 a single-owner legacy snapshot migrates into scoped storage without a network request', async () => {
+test('F16 a single-owner legacy snapshot migrates into scoped storage; only the start-up confirmation is requested', async () => {
 	const saved = snapshot({ orgId: ORG, orgIds: [ORG] });
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
 	await env.clock.flush();
 	assert.equal(env.lastUsage().five_hour.utilization, 71);
 	assert.equal(env.stored(`claude_usage_state:${ORG}`).version, 2);
-	assert.equal(env.calls.usageRequests.length, 0);
+	assert.equal(env.calls.usageRequests.length, 1, 'one start-up confirmation (#15), no extra migration request');
 });
 
 test('F17 switching back restores only that organisation quota, before its fresh poll answers', async () => {
