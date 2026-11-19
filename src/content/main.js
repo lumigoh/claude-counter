@@ -384,6 +384,7 @@
 		try {
 			if (typeof chrome !== 'undefined' && chrome.storage?.local) chrome.storage.local.set({ claude_last_org_id: newOrgId });
 		} catch {}
+		ui.setOrg(newOrgId);
 		if (switching) {
 			lastOrgSwitchMs = Date.now();
 			usageState = null;

@@ -54,6 +54,7 @@ async function createMainEnv({ storage = {}, pathname = `/chat/${CONV}`, cookie 
 			calls.uiOpts = opts;
 		}
 		setTokenCounter(state) { calls.tokenStates.push(clone(state)); }
+		setOrg(orgId) { calls.orgs = [...(calls.orgs || []), orgId]; }
 		initialize() {}
 		attachUsageLine() {}
 		attachHeader() {}

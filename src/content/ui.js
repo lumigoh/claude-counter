@@ -132,6 +132,24 @@
 			this.sessionHistory = [];
 			this.sessionResetKey = null;
 			this.refreshingUsage = false;
+			this.orgId = null;
+		}
+
+		/**
+		 * The active organisation (set by main.js). Recent session readings are stored per
+		 * organisation, so switching never mixes one org's readings into another's tooltip (#6).
+		 */
+		setOrg(orgId) {
+			if (orgId === this.orgId) return;
+			this.orgId = orgId || null;
+			this.sessionHistory = [];
+			this.sessionResetKey = null;
+			this._updateSessionTooltip();
+		}
+
+		/** Storage key for the readings, or null while the organisation is unknown (memory only). */
+		_historyKey() {
+			return this.orgId ? `claude_session_history:${this.orgId}` : null;
 		}
 
 		getProgressChrome() {
@@ -469,7 +487,10 @@
 				return;
 			}
 
+			const key = this._historyKey();
+			const orgAtStart = this.orgId;
 			const processHistory = (storedResetsAt, storedHistory) => {
+				if (this.orgId !== orgAtStart) return; // the org changed while storage was being read
 				let history = [];
 				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
 					history = [...storedHistory];
@@ -492,9 +513,9 @@
 				this._updateSessionTooltip();
 
 				try {
-					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+					if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
 						chrome.storage.local.set({
-							claude_session_history: { version: 2, resets_at: resetsAt, history }
+							[key]: { version: 2, resets_at: resetsAt, history }
 						});
 					}
 				} catch (e) {
@@ -505,9 +526,9 @@
 			if (this.sessionResetKey !== resetsAt) {
 				this.sessionResetKey = resetsAt;
 				try {
-					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-						chrome.storage.local.get(['claude_session_history'], (result) => {
-							const data = result?.claude_session_history;
+					if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
+						chrome.storage.local.get([key], (result) => {
+							const data = result?.[key];
 							processHistory(data?.version === 2 ? data.resets_at : null, data?.history);
 						});
 					} else {
