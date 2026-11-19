@@ -423,3 +423,57 @@ test('O29 a switch while a restore is still reading storage restores the new org
 	while (held.length) { held.shift()(); await env.clock.flush(); }
 	assert.equal(env.lastUsage().five_hour.utilization, 7);
 });
+
+// ---- targeted review (#16): every unlabelled reply gets a poll that starts after it ----------------
+
+test('O26 an unlabelled reply right after a poll gets its own poll, coalesced, ~5 s after the last one (B2)', async () => {
+	let value = 42;
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: async () => ({ five_hour: liveWindow(value, START + HOUR), seven_day: null }) });
+	await env.clock.advance(60 * 1000);
+	await env.calls.uiOpts.onUsageRefresh(); // a successful poll at t
+	assert.equal(env.lastUsage().five_hour.utilization, 42);
+	const before = env.calls.usageRequests.length;
+	value = 51; // the reply used quota
+	await env.clock.advance(1000);
+	for (let i = 0; i < 3; i++) await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.51, 3600], sevenD: null }), { orgId: null, openedAt: START });
+	await env.clock.advance(3000);
+	assert.equal(env.calls.usageRequests.length, before, 'not before 5 s after the last request');
+	await env.clock.advance(1100);
+	assert.equal(env.calls.usageRequests.length, before + 1, 'one poll for the burst');
+	assert.equal(env.lastUsage().five_hour.utilization, 51);
+	await env.clock.advance(60 * 1000);
+	assert.equal(env.calls.usageRequests.length, before + 1, 'and no more');
+});
+
+test('O30 a reply during a poll that started before it gets a follow-up poll (B2)', async () => {
+	let value = 42;
+	let complete;
+	const env = await createMainEnv({ storage: { claude_last_org_id: ORG }, startMs: START, usage: async () => ({ five_hour: liveWindow(value, START + HOUR), seven_day: null }) });
+	await env.clock.advance(60 * 1000);
+	env.answers.usage = () => new Promise((resolve) => { complete = resolve; });
+	const poll = env.calls.uiOpts.onUsageRefresh(); // in flight, started before the reply
+	await env.clock.flush();
+	const before = env.calls.usageRequests.length;
+	await env.clock.advance(1000);
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.51, 3600], sevenD: null }), { orgId: null, openedAt: START });
+	complete({ five_hour: liveWindow(42, START + HOUR), seven_day: null }); // answer from before the reply
+	await poll;
+	env.answers.usage = async () => ({ five_hour: liveWindow(51, START + HOUR), seven_day: null });
+	await env.clock.advance(6000);
+	assert.equal(env.calls.usageRequests.length, before + 1);
+	assert.equal(env.lastUsage().five_hour.utilization, 51);
+});
+
+test('O28 a labelled turn end that arrives before the first org is accepted still recounts (B5)', async () => {
+	let messages = [{}];
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch, showTokenCounter: true, conversations: {} });
+	env.answers.conversation = async () => ({ chat_messages: messages });
+	env.document.cookie = `lastActiveOrg=${ORG}`; // readable now, not yet accepted
+	await env.emit('cc:turn_end', {}, { orgId: ORG, openedAt: START });
+	await env.clock.flush();
+	messages = [{}, {}]; // the reply is stored
+	await env.clock.advance(4000); // the org resolves (≤ 2 s), then the turn-end recount runs 1.2 s later
+	assert.ok(env.calls.conversationRequests.length >= 2, `recounted after the turn (${env.calls.conversationRequests.length} requests)`);
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 20);
+});

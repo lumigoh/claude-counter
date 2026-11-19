@@ -28,8 +28,7 @@
 			// ones (cookie unreadable) still recount: a recount always fetches the active org's current
 			// chat, so it cannot show wrong numbers.
 			CC.bridge.on('cc:turn_end', (payload, meta) => {
-				if (meta?.orgId && meta.orgId !== this.activeOrgId) return;
-				this._afterTurn();
+				this._onTurnEnd(meta).catch(() => {});
 			});
 			const navigate = () => {
 				this.revision++;
@@ -122,6 +121,17 @@
 			})();
 			this.inFlight = request;
 			return request.promise;
+		}
+
+		// A labelled turn end can only be judged once the active org is known; before the first org is
+		// accepted, wait for it instead of dropping a valid turn end (#16).
+		async _onTurnEnd(meta) {
+			if (!this.enabled) return;
+			if (meta?.orgId) {
+				const active = this.activeOrgId || (await this.getOrgId());
+				if (active && meta.orgId !== active) return;
+			}
+			this._afterTurn();
 		}
 
 		_afterTurn() {

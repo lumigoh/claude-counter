@@ -585,6 +585,7 @@
 
 		if (usageFetchInFlight) return;
 		usageFetchInFlight = true;
+		lastUsageRequestStartMs = Date.now();
 		const request = { orgId, orgRevision, revisions: Object.fromEntries(USAGE_WINDOW_KEYS.map((key) => [key, windowFreshness[key].revision])) };
 		let raw = null;
 		try {
@@ -602,6 +603,8 @@
 			} catch {}
 		} finally {
 			usageFetchInFlight = false;
+			// A reply that arrived while this request ran may need its own poll (#16).
+			Promise.resolve().then(maybeRunReplyPoll);
 		}
 
 		if (request.orgRevision !== orgRevision || request.orgId !== currentOrgId) {
@@ -661,7 +664,7 @@
 	 */
 	function handleMessageLimit(messageLimit, meta) {
 		if (!meta?.orgId) {
-			refreshUsageIfStale(5000);
+			requestReplyPoll();
 			return;
 		}
 		// The cookie may already name the stream's org before the tick notices (start-up, or within
@@ -670,6 +673,45 @@
 		if (meta?.orgId && meta.orgId !== currentOrgId) return;
 		const parsed = parseUsageFromMessageLimit(messageLimit);
 		applyUsageUpdate(parsed, 'sse');
+	}
+
+	// An unlabelled reply (#11) is never applied; its numbers come from a /usage poll instead. That poll
+	// must start *after* the reply (#16): a request already running, or one that just finished,
+	// predates the reply's usage. Replies in a burst share one poll, which runs no sooner than
+	// REPLY_POLL_SPACING_MS after the last request started. Hidden tabs wait for visibility, and
+	// failure or free-plan backoff drops the request (no live values without the cookie there).
+	const REPLY_POLL_SPACING_MS = 5000;
+	let lastUsageRequestStartMs = -Infinity;
+	let replyPollAfter = 0;
+	let replyPollTimer = null;
+
+	function requestReplyPoll() {
+		replyPollAfter = Math.max(replyPollAfter, Date.now());
+		maybeRunReplyPoll();
+	}
+
+	function maybeRunReplyPoll() {
+		if (!replyPollAfter || replyPollTimer) return;
+		if (document.hidden || usageFetchInFlight) return; // resumed on visibility / when the request ends
+		const now = Date.now();
+		if ((usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs) {
+			replyPollAfter = 0;
+			return;
+		}
+		if (lastUsageRequestStartMs > replyPollAfter) {
+			replyPollAfter = 0; // a poll already started after the reply
+			return;
+		}
+		const waitMs = lastUsageRequestStartMs + REPLY_POLL_SPACING_MS - now;
+		if (waitMs > 0) {
+			replyPollTimer = setTimeout(() => {
+				replyPollTimer = null;
+				maybeRunReplyPoll();
+			}, waitMs);
+			return;
+		}
+		replyPollAfter = 0;
+		refreshUsage();
 	}
 
 	CC.bridge.on('cc:message_limit', handleMessageLimit);
@@ -749,6 +791,7 @@
 		if (!document.hidden) {
 			ui.tick();
 			refreshUsageIfStale(60 * 1000);
+			maybeRunReplyPoll();
 		}
 	});
 
