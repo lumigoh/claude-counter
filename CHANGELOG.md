@@ -115,7 +115,7 @@ A second independent review found that several targeted-review fixes added new t
 A review of the final round found one high and four medium issues. Following the stopping rule, the design was simplified instead of patched (see *Design rules* in `docs/architecture.md`):
 - **D1: no candidate re-checks.** After start-up, only the cookie or page setting switches the org. This fixes a stale re-check switching to the wrong org (high) and candidates being stranded or re-checked twice.
   - Cost: without a cookie, a multi-org user who switches org needs a reload or the cookie.
-- **D2: one start-up decision.** Start-up runs once per page load with one org-list request and is never restarted, even after an inconclusive list.
+- **D2: one start-up decision.** Start-up runs once per page load with at most one org-list request and is never restarted, even after an inconclusive list.
 - **D3: one poll gate.** Every `/usage` request waits for start-up and for the org's snapshot step, then checks hidden tab, request in flight, backoff and freshness in one place. Fixes:
   - a focus poll or a switch beating the snapshot;
   - a double start-up poll;

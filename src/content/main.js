@@ -128,7 +128,7 @@
 	}
 
 	/**
-	 * The one start-up decision (D2). It makes exactly one org-list request; the list and the
+	 * The one start-up decision (D2). It makes at most one org-list request; the list and the
 	 * remembered org share one deadline, and a read that has not answered by then counts as missing.
 	 *   cookie / page storage -> list `active` -> valid remembered org -> sole org -> first candidate
 	 * A list naming the active org is used at once, without waiting for the remembered org. If nothing
@@ -440,8 +440,8 @@
 			nextUsageAttemptMs = Date.now() + USAGE_RETRY_MS;
 			ui.setUsage(null);
 		}
-		// The org's ready gate (D3): its snapshot restore. Every poll waits for it, so no poll answer
-		// can land before the snapshot is shown. Deferred so callers finish their own bookkeeping.
+		// The org's ready gate (D3) gives the snapshot restore time to display before polling (D6).
+		// Deferred so callers finish their own bookkeeping.
 		readyGate = { org: newOrgId, promise: Promise.resolve().then(() => restoreUsageIfNeeded()).catch(() => {}) };
 		// Confirm the snapshot (its age is unknown, A5) or fetch the new org's usage. pollUsage's
 		// freshness rule (D4) makes this the one start-up poll.

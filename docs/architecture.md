@@ -49,7 +49,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
   - A candidate is only used while no org is known: start-up takes the first one seen, and after a start-up that found nothing, the next one becomes the org.
   - Cost: without a cookie, a multi-org user who switches org keeps the start-up org until a reload or until the cookie appears.
 - **D2: one start-up decision per page load.**
-  - It runs once and settles within 2 s, with an org or with none. It makes exactly one org-list request. Callers wait for it but never restart it.
+  - It runs once and settles within 2 s, with an org or with none. It makes at most one org-list request. Callers wait for it but never restart it.
   - The list and the remembered org are read at the same time and share the 2 s limit; a read that hasn't answered by then counts as missing.
   - A list that marks one org `active` is used at once, without waiting for the remembered org.
   - If start-up settles with none, a later list answer naming an active or sole org can still supply the *first* org. It never replaces one.
@@ -59,7 +59,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
   2. Wait for the org's **ready gate**, its snapshot restore, which is set on every acceptance. If another acceptance happened meanwhile (even back to the same org), stop: that acceptance polls for itself.
   3. In one place, check hidden tab, request in flight, backoff and freshness. Only the user's click overrides backoff.
 - **D4: fresh means both windows are live.** A restored snapshot is shown at once but isn't fresh, because its age is unknown. If either window lacks a live reading, freshness comes from a poll answer received since the last window expiry.
-
+- **D5: session history follows the current org and reset window.** See *Recent session readings*.
 - **D6: every wait in the poll path has a time limit.** Bridge readiness and start-up each have a 2 s limit. The ready gate gives the snapshot read 3 s, then polling can proceed. The bridge usage request and the direct fallback each have a 5 s limit. The fallback shares one deadline between the fetch and its body, and aborts on timeout. A direct timeout releases the in-flight slot and enters failure backoff for the active org.
 
 **A genuine switch** is a trusted source naming a different org. The 1-second tick notices cookie changes. On a switch:

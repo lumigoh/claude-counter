@@ -737,3 +737,13 @@ test('O49 D3: a click pending on a snapshot cannot poll a hidden tab', async () 
 	await env.calls.uiOpts.onUsageRefresh();
 	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, B, B], 'a visible click still bypasses backoff');
 });
+
+test('O50 D2: trusted startup makes zero org-list requests', async () => {
+	let listRequests = 0;
+	const env = await createMainEnv({
+		cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage,
+		fetch: async () => { listRequests++; return { ok: false }; }
+	});
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
+	assert.equal(listRequests, 0);
+});
