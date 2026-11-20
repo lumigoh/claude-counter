@@ -714,3 +714,26 @@ for (const known of [false, true]) {
 		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), known ? [ORG, B] : [B]);
 	});
 }
+
+test('O49 D3: a click pending on a snapshot cannot poll a hidden tab', async () => {
+	let held;
+	const env = await createMainEnv({
+		cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage,
+		beforeStart: (e) => { held = holdSnapshotReads(e); }
+	});
+	held.shift()();
+	await env.clock.flush();
+	await switchCookie(env, B);
+	const click = env.calls.uiOpts.onUsageRefresh();
+	await env.clock.flush();
+	env.document.hidden = true;
+	held.shift()();
+	await click;
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
+
+	env.document.hidden = false;
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.clock.flush();
+	await env.calls.uiOpts.onUsageRefresh();
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, B, B], 'a visible click still bypasses backoff');
+});

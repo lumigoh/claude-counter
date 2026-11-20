@@ -566,9 +566,8 @@
 		const orgId = gate.org;
 
 		const now = Date.now();
-		if (usageFetchInFlight) return;
+		if (document.hidden || usageFetchInFlight) return;
 		if (!force) {
-			if (document.hidden) return;
 			if (isUsageBackingOff(now)) return;
 			if (maxAgeMs && now - freshSinceMs() < maxAgeMs) return;
 		}
