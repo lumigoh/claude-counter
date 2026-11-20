@@ -42,7 +42,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 5. the account's only org,
 6. the first candidate seen.
 
-**Design rules (2.1.8 simplification).** Four review rounds showed that many triggers, each with its own guard, can't be made safe by patching. So the code is kept to four rules, and each test targets one of them.
+**Design rules (2.1.8 simplification).** Four review rounds showed that many triggers, each with its own guard, can't be made safe by patching. The rules below define the behaviour of each path.
 
 - **D1: after start-up, only a trusted source switches the org.** That means the cookie or the page setting, read every second by the tick and synchronously before a labelled event is dropped.
   - A candidate (an org ID seen in a request, `cc:org_detected`) never switches a known org and never asks the org list. claude.ai requests other organisations too, such as team plus personal accounts.
@@ -60,14 +60,16 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
   3. In one place, check hidden tab, request in flight, backoff and freshness. Only the user's click overrides backoff.
 - **D4: fresh means both windows are live.** A restored snapshot is shown at once but isn't fresh, because its age is unknown. If either window lacks a live reading, only the last poll answer counts as fresh.
 
+- **D6: every wait in the poll path has a time limit.** Bridge readiness and start-up each have a 2 s limit. The ready gate gives the snapshot read 3 s, then polling can proceed. The bridge usage request and the direct fallback each have a 5 s limit. The fallback shares one deadline between the fetch and its body, and aborts on timeout. A direct timeout releases the in-flight slot and enters failure backoff for the active org.
+
 **A genuine switch** is a trusted source naming a different org. The 1-second tick notices cookie changes. On a switch:
 - memory and the screen are cleared,
 - the per-org snapshots on disk are kept,
 - in-flight polls are invalidated through revisions and the ready gate,
-- the new org's snapshot is restored, and then it is polled.
+- the new org's snapshot gets a bounded restore attempt before it is polled.
 
 **Snapshots.**
-- Every acceptance restores the org's snapshot and polls once after it (D3). With the freshness rule (D4), that makes one poll per page load.
+- Every acceptance attempts to restore the org's snapshot before polling (D3, D6). With the freshness rule (D4), that makes one poll per page load.
 - Callers share the restore in flight for the same org.
 - An expired snapshot asks for fresh data at once only if no poll has answered or failed yet. Backoff (failure, free plan) is checked in `pollUsage`, so neither a restore nor the expiry tick can shorten it.
 

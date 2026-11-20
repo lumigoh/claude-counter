@@ -6,6 +6,10 @@ All notable changes to the Claude Counter extension will be documented in this f
 
 Audit fixes, tracked in #1. Each item lists its issue.
 
+### Polling and startup follow-up
+
+- **Bounded usage waits.** A stalled snapshot gives way after 3 seconds. The direct usage fallback aborts after 5 seconds, including body reading, so the active org can retry after backoff. A failed bridge request only starts a fallback while its org is still current and the tab is visible.
+
 ### Fixed
 - **Organisation switching (#2).**
   - An organisation ID seen in a page request is now only a candidate. The active organisation comes from trusted sources: the `lastActiveOrg` cookie, claude.ai's saved setting, or an org list that marks one org active.

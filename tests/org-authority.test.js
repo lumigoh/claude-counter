@@ -564,7 +564,7 @@ test('O38 D3: a focus poll waits for the snapshot; the snapshot always shows bef
 		beforeStart: (e) => { held = holdSnapshotReads(e); }
 	});
 	env.window.dispatchEvent({ type: 'focus' });
-	await env.clock.advance(3000);
+	await env.clock.advance(2999);
 	assert.equal(env.calls.usageRequests.length, 0, 'nothing polls before the snapshot step');
 	while (held.length) { held.shift()(); await env.clock.flush(); }
 	const shown = env.calls.setUsage.filter(Boolean).map((u) => u.five_hour?.utilization);

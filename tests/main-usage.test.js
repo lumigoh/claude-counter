@@ -620,6 +620,79 @@ test('F08 direct-fetch fallback retains the original poll freshness boundary', a
 	assert.equal(env.lastUsage().five_hour.utilization, 40);
 });
 
+test('F09 D6: a stalled snapshot releases the ready gate after three seconds', async () => {
+	let release;
+	const env = await createMainEnv({
+		storage: orgStored, startMs: START, usage: usefulUsage,
+		beforeStart: ({ chrome }) => {
+			const get = chrome.storage.local.get;
+			chrome.storage.local.get = (keys, cb) => {
+				if (keys.includes(`claude_usage_state:${ORG}`)) release = cb;
+				else get(keys, cb);
+			};
+		}
+	});
+	env.window.dispatchEvent({ type: 'focus' });
+	await env.clock.advance(2999);
+	assert.equal(typeof release, 'function');
+	assert.equal(env.calls.usageRequests.length, 0);
+	await env.clock.advance(1);
+	assert.equal(env.calls.usageRequests.length, 1);
+	const readings = env.calls.setUsage.length;
+	release({ [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: liveWindow(99, START + HOUR) } } });
+	await env.clock.flush();
+	assert.equal(env.calls.setUsage.length, readings, 'the timed-out callback is ignored');
+});
+
+for (const phase of ['fetch', 'body']) {
+	test(`F10 ${phase} D6: a stalled direct /usage ${phase} aborts and enters failure backoff`, async () => {
+		let signal;
+		let readBody = false;
+		const stalled = new Promise(() => {});
+		const env = await createMainEnv({
+			storage: orgStored, startMs: START, usage: async () => { throw new Error('bridge timeout'); },
+			fetch: async (url, options) => {
+				if (!url.endsWith('/usage')) return { ok: false };
+				signal = options.signal;
+				return phase === 'fetch' ? stalled : { ok: true, json: () => { readBody = true; return stalled; } };
+			}
+		});
+		assert.equal(readBody, phase === 'body');
+		assert.equal(signal?.aborted, false, 'the direct request receives a live signal');
+		await env.clock.advance(4999);
+		assert.equal(signal.aborted, false);
+		await env.clock.advance(1);
+		assert.equal(signal.aborted, true);
+		env.window.dispatchEvent({ type: 'focus' });
+		await env.clock.advance(MIN - 1);
+		assert.equal(env.calls.usageRequests.length, 1, 'the timeout counts as a failure');
+		env.answers.usage = usefulUsage;
+		await env.clock.advance(1001);
+		assert.equal(env.calls.usageRequests.length, 2, 'the retry is no longer blocked by the timed-out request');
+		assert.ok(env.lastUsage());
+	});
+}
+
+for (const change of ['switch', 'hide']) {
+	test(`F11 ${change} D6: ${change} during a bridge poll suppresses its direct fallback`, async () => {
+		let fail;
+		const fallbacks = [];
+		const env = await createMainEnv({
+			cookie: `lastActiveOrg=${ORG}`, startMs: START,
+			usage: () => new Promise((resolve, reject) => { fail = reject; }),
+			fetch: async (url) => { fallbacks.push(url); return { ok: false }; }
+		});
+		if (change === 'switch') await switchOrg(env, OTHER_ORG);
+		else env.document.hidden = true;
+		env.answers.usage = usefulUsage;
+		fail(new Error('bridge timeout'));
+		await env.clock.flush();
+		await env.clock.advance(1000);
+		assert.deepEqual(fallbacks, []);
+		if (change === 'switch') assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, OTHER_ORG]);
+	});
+}
+
 test('F14 a cache restore during a poll cannot outrank the fresh endpoint answer', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
 	await env.clock.advance(6000);

@@ -2111,6 +2111,16 @@ function start() {
 	const ORG_LIST_WAIT_MS = 2000;
 	const TIMED_OUT = Symbol('timed out');
 
+	async function withDeadline(promise, timeoutMs) {
+		let timer;
+		try {
+			const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs); });
+			return await Promise.race([promise, deadline]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
 	/** A trusted source (cookie, page storage) wins at every step of start-up. */
 	function acceptTrustedNow() {
 		const trusted = readTrustedOrgSync();
@@ -2503,7 +2513,7 @@ function start() {
 		lastRestore = { org: orgId, at: now };
 
 		const revision = orgRevision;
-		const entry = await readStoredUsage(orgId);
+		const entry = await withDeadline(readStoredUsage(orgId), 3000);
 		if (revision !== orgRevision || orgId !== currentOrgId) return false;
 		const cached = entry?.usage;
 		if (!cached) return false;
@@ -2523,6 +2533,21 @@ function start() {
 		return bothLive ? Math.max(lastUsageUpdateMs, lastUsageFetchMs) : lastUsageFetchMs;
 	}
 
+	async function fetchUsageDirect(orgId) {
+		const controller = new AbortController();
+		const fetchAndRead = async () => {
+			const res = await fetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
+				credentials: 'include',
+				signal: controller.signal
+			});
+			return res.ok ? res.json() : null;
+		};
+		const result = await withDeadline(fetchAndRead(), 5000);
+		if (result !== TIMED_OUT) return result;
+		controller.abort();
+		return null;
+	}
+
 	/**
 	 * The only way /usage is asked (D3). Every trigger (acceptance, page change, focus, visibility,
 	 * stream timers, the tick, expiry, reply polls, the user) comes here. The order is fixed:
@@ -2532,11 +2557,12 @@ function start() {
 	 */
 	async function pollUsage({ maxAgeMs = 0, force = false } = {}) {
 		await bridgeReady;
-		const orgId = await getOrgId();
-		if (!orgId) return;
+		await getOrgId();
 		const gate = readyGate;
-		await gate?.promise;
+		if (!gate) return;
+		await gate.promise;
 		if (gate !== readyGate) return; // a newer acceptance (any switch, even back to this org) polls itself
+		const orgId = gate.org;
 
 		const now = Date.now();
 		if (usageFetchInFlight) return;
@@ -2554,16 +2580,10 @@ function start() {
 		try {
 			raw = await CC.bridge.requestUsage(orgId);
 		} catch {
-			// Bridge failed or timed out; try direct fetch fallback
-			try {
-				// Encoded although accepted IDs are URL-safe: defence in depth (#5).
-				const res = await fetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
-					credentials: 'include'
-				});
-				if (res.ok) {
-					raw = await res.json();
-				}
-			} catch {}
+			// A failed bridge request can fall back only while this acceptance is still current and visible.
+			if (gate === readyGate && !document.hidden) {
+				try { raw = await fetchUsageDirect(orgId); } catch {}
+			}
 		} finally {
 			usageFetchInFlight = false;
 			// A reply that arrived while this request ran may need its own poll (#16).
