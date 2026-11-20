@@ -44,7 +44,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 
 **Design rules (2.1.8 simplification).** Four review rounds showed that many triggers, each with its own guard, can't be made safe by patching. The rules below define the behaviour of each path.
 
-- **D1: after start-up, only a trusted source switches the org.** That means the cookie or the page setting, read every second by the tick and synchronously before a labelled event is dropped.
+- **D1: after start-up, only a trusted source switches the org.** That means the cookie or the page setting, read every second by the tick, when a candidate arrives, and synchronously before a labelled event is dropped.
   - A candidate (an org ID seen in a request, `cc:org_detected`) never switches a known org and never asks the org list. claude.ai requests other organisations too, such as team plus personal accounts.
   - A candidate is only used while no org is known: start-up takes the first one seen, and after a start-up that found nothing, the next one becomes the org.
   - Cost: without a cookie, a multi-org user who switches org keeps the start-up org until a reload or until the cookie appears.

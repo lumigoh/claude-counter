@@ -665,3 +665,52 @@ test('O45 D3: A -> B -> A while restores are held: the old A poll waits for the 
 	assert.deepEqual(env.calls.usageRequests.map((r) => r.orgId), [ORG]);
 	assert.equal(env.lastUsage().five_hour.utilization, 41);
 });
+for (const pending of ['list', 'remembered']) {
+	test(`O46 ${pending} D2: a newer cookie beats the org accepted while awaiting ${pending}`, async () => {
+		const fetch = heldFetch();
+		let remembered;
+		const env = await createMainEnv({
+			startMs: START, usage: emptyUsage,
+			fetch: pending === 'list' ? fetch : list({ uuid: ORG }, { uuid: B }),
+			beforeStart: ({ chrome }) => {
+				if (pending !== 'remembered') return;
+				const get = chrome.storage.local.get;
+				chrome.storage.local.get = (keys, cb) => {
+					if (keys.includes('claude_last_org_id')) remembered = cb;
+					else get(keys, cb);
+				};
+			}
+		});
+		await switchCookie(env, ORG);
+		env.document.cookie = `lastActiveOrg=${B}`; // newer than the tick's choice
+		if (pending === 'list') fetch.answer([{ uuid: C, active: true }]);
+		else remembered({ claude_last_org_id: C });
+		await env.clock.flush();
+		assert.deepEqual(env.calls.orgs, [ORG, B]);
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [B]);
+	});
+}
+
+test('O47 D2: a cookie present when a late list answers is accepted immediately', async () => {
+	const fetch = heldFetch();
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+	await env.clock.advance(2100);
+	env.document.cookie = `lastActiveOrg=${B}`;
+	fetch.answer([{ uuid: C, active: true }]);
+	await env.clock.flush();
+	assert.deepEqual(env.calls.orgs, [B]);
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [B]);
+});
+
+for (const known of [false, true]) {
+	test(`O48 ${known ? 'known' : 'unknown'} D1: a candidate prompts an immediate trusted read`, async () => {
+		const env = await createMainEnv({
+			startMs: START, usage: emptyUsage, cookie: known ? `lastActiveOrg=${ORG}` : ''
+		});
+		env.document.cookie = `lastActiveOrg=${B}`;
+		await env.emit('cc:org_detected', { orgId: C });
+		await env.clock.flush();
+		assert.deepEqual(env.calls.orgs, known ? [ORG, B] : [B]);
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), known ? [ORG, B] : [B]);
+	});
+}

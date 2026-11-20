@@ -145,11 +145,11 @@
 		const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), ORG_LIST_WAIT_MS); });
 		try {
 			const list = await Promise.race([listPromise, deadline]);
-			if (currentOrgId || acceptTrustedNow()) return; // decided while we waited (A3)
+			if (acceptTrustedNow() || currentOrgId) return; // decided while we waited (A3)
 			if (list !== TIMED_OUT && list?.active) return acceptActiveOrg(list.active);
 
 			const remembered = await Promise.race([rememberedPromise, deadline]);
-			if (currentOrgId || acceptTrustedNow()) return;
+			if (acceptTrustedNow() || currentOrgId) return;
 			const rememberedValid = remembered !== TIMED_OUT && CC.isPlausibleOrgId(remembered) ? remembered : null;
 			// 2.1.7 remembered route words such as "discoverable". Skip and forget them (A1). The
 			// userscript storage adapter has no remove(), so overwrite with null.
@@ -160,7 +160,7 @@
 			if (list === TIMED_OUT) {
 				// Settle now; a late answer may still supply the *first* org, never a correction.
 				listPromise.then((late) => {
-					if (!currentOrgId && !readTrustedOrgSync()) acceptActiveOrg(late?.active || late?.single);
+					if (!acceptTrustedNow() && !currentOrgId) acceptActiveOrg(late?.active || late?.single);
 				}).catch(() => {});
 			}
 		} finally {
@@ -180,7 +180,7 @@
 	 * never switches a known org and never asks the org list.
 	 */
 	function handleOrgCandidate(orgId) {
-		if (!CC.isPlausibleOrgId(orgId)) return;
+		if (!CC.isPlausibleOrgId(orgId) || acceptTrustedNow()) return;
 		if (!firstCandidateOrgId) firstCandidateOrgId = orgId;
 		if (!currentOrgId && startupSettled) acceptActiveOrg(orgId);
 	}
