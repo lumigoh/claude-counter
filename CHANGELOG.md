@@ -10,6 +10,7 @@ Audit fixes, tracked in #1. Each item lists its issue.
 
 - **Bounded usage waits.** A stalled snapshot gives way after 3 seconds. The direct usage fallback aborts after 5 seconds, including body reading, so the active org can retry after backoff. A failed bridge request only starts a fallback while its org is still current and the tab is visible.
 - **Trusted org precedence.** Startup resumes and candidate events check the current cookie or page setting before keeping or choosing an org.
+- **Backoff.** Live readings preserve the failure and free-plan retry deadlines.
 
 ### Fixed
 - **Organisation switching (#2).**

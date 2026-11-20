@@ -71,7 +71,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 **Snapshots.**
 - Every acceptance attempts to restore the org's snapshot before polling (D3, D6). With the freshness rule (D4), that makes one poll per page load.
 - Callers share the restore in flight for the same org.
-- An expired snapshot asks for fresh data at once only if no poll has answered or failed yet. Backoff (failure, free plan) is checked in `pollUsage`, so neither a restore nor the expiry tick can shorten it.
+- An expired snapshot asks for fresh data at once only if no poll has answered or failed yet. Backoff (failure, free plan) is checked in `pollUsage`, and usage readings preserve its deadline.
 
 ## Accepting usage numbers
 

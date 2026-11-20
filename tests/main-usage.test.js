@@ -374,6 +374,30 @@ test('M20 a reload follows the cookie, not another organisation ID seen in reque
 // #57 refresh triggers must coexist with #60's empty-answer and failure backoff.
 const usefulUsage = async () => ({ five_hour: liveWindow(20, START + 10 * HOUR), seven_day: liveWindow(10, START + 100 * HOUR) });
 
+test('M57f D3: a live reading cannot shorten a paid account’s failure backoff', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
+	env.answers.usage = async () => { throw new Error('offline'); };
+	await env.clock.advance(12 * MIN);
+	assert.deepEqual(env.calls.usageRequests.map(({ at }) => (at - START) / MIN), [0, 5, 6, 8, 12]);
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: null }), ORG_STREAM);
+	assert.equal(env.lastUsage().five_hour.utilization, 30);
+	await env.clock.advance(8 * MIN - 1);
+	assert.equal(env.calls.usageRequests.length, 5);
+	await env.clock.advance(1);
+	assert.equal(env.calls.usageRequests.length, 6);
+});
+
+test('M57g D3: a live reading preserves the free-plan backoff deadline', async () => {
+	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+	await env.clock.advance(30 * MIN);
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: null }), ORG_STREAM);
+	assert.equal(env.lastUsage().five_hour.utilization, 30);
+	await env.clock.advance(30 * MIN - 1);
+	assert.equal(env.calls.usageRequests.length, 1);
+	await env.clock.advance(1);
+	assert.equal(env.calls.usageRequests.length, 2);
+});
+
 test('M57a useful endpoint data is refreshed every five visible minutes', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
 	await env.clock.advance(5 * MIN - 1000);

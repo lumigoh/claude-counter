@@ -326,6 +326,7 @@
 	let lastUsageFetchMs = 0;
 	let usageEndpointEmpty = false;
 	let usageEndpointHasData = false;
+	const isUsageBackingOff = (now) => (usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs;
 
 	let tokenCounter;
 	const ui = new CC.ui.CounterUI({
@@ -397,7 +398,7 @@
 			// An expired snapshot asks for fresh data at once, but only before any poll has answered or
 			// failed for this org: a restore never shortens a backoff (failure, free plan; R6).
 			if (!lastUsageFetchMs && !usageFailures && USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
-		} else {
+		} else if (source === 'sse' && !isUsageBackingOff(now)) {
 			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
 		if (source !== 'cache') persistUsage();
@@ -567,7 +568,7 @@
 		if (usageFetchInFlight) return;
 		if (!force) {
 			if (document.hidden) return;
-			if ((usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs) return;
+			if (isUsageBackingOff(now)) return;
 			if (maxAgeMs && now - freshSinceMs() < maxAgeMs) return;
 		}
 		usageFetchInFlight = true;
@@ -667,7 +668,7 @@
 		if (!replyPollAfter || replyPollTimer) return;
 		if (document.hidden || usageFetchInFlight) return; // resumed on visibility / when the request ends
 		const now = Date.now();
-		if ((usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs) {
+		if (isUsageBackingOff(now)) {
 			replyPollAfter = 0;
 			return;
 		}
