@@ -102,7 +102,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
 ## Recent session readings
 
 The Session tooltip's "Recent readings" are stored per org and reset window (`claude_session_history:<org>`).
-- A window's saved history is loaded once. Readings that arrive while the load is pending are queued and applied on top of the saved history when it lands, then saved once.
+- A window’s saved history is loaded once per visit to that window. Reset timestamps that represent the same instant use the same history. Readings that arrive while the load is pending are queued and applied on top of the saved history when it lands, then saved once.
 - A load belongs to one org and one window. Switching org, clearing, or a new window invalidates it, so a late read can't leak one org's readings into another's.
 - Starting a load for a different window hides the old window's readings until the new history lands (D5). A reset time going R1→R2→R1 therefore reloads R1.
 

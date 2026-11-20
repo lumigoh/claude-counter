@@ -553,3 +553,32 @@ test('U73 D5: a reset time going R1 -> R2 -> R1 while R2 loads never saves R2 hi
 	assert.deepEqual(env.storageData[key].history, [10, 12]);
 	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 12%/);
 });
+
+test('U74 D5: equivalent reset timestamps share saved, pending and loaded history', async () => {
+	const env = createUiEnv();
+	const orgId = 'org-a-0001';
+	const key = `claude_session_history:${orgId}`;
+	const r1 = iso(START + HOUR);
+	const sameReset = r1.replace('.000Z', 'Z');
+	env.storageData[key] = { version: 2, resets_at: r1, history: [10] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg(orgId);
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: sameReset } });
+	env.ui.setUsage({ five_hour: { utilization: 25, resets_at: r1 } });
+	assert.equal(reads.length, 1, 'the equivalent timestamp joins the pending load');
+	reads[0]();
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 20, 25], 'saved history for the same instant is used');
+	env.ui.setUsage({ five_hour: { utilization: 30, resets_at: r1 } });
+	assert.equal(reads.length, 1, 'the equivalent timestamp uses the loaded history');
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20% → 25% → 30%/);
+});
+
+test('U75 D5: an invalid reset timestamp cannot identify a session history', () => {
+	const env = createUiEnv();
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: 'unknown' } });
+	assert.equal(reads.length, 0);
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+});

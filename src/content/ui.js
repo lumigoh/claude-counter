@@ -185,7 +185,7 @@
 			this.onUsageRefresh = onUsageRefresh || null;
 			this.onTokenCounterRefresh = onTokenCounterRefresh || (() => {});
 			this.sessionHistory = [];
-			this.sessionResetKey = null;
+			this.sessionHistoryResetMs = null;
 			this.refreshingUsage = false;
 			this.orgId = null;
 		}
@@ -204,7 +204,7 @@
 		_resetHistory() {
 			this._historyLoad = null;
 			this.sessionHistory = [];
-			this.sessionResetKey = null;
+			this.sessionHistoryResetMs = null;
 			this._updateSessionTooltip();
 		}
 
@@ -563,20 +563,21 @@
 		 * leak one organisation's readings into another's.
 		 */
 		_updateSessionHistory(resetsAt, currentPct) {
-			if (!resetsAt) {
+			const resetMs = Date.parse(resetsAt);
+			if (!Number.isFinite(resetMs)) {
 				this._resetHistory();
 				return;
 			}
 			const key = this._historyKey();
 
 			// Already loaded for this window: update in memory and save.
-			if (this.sessionResetKey === resetsAt) {
-				this._applyReadings(key, resetsAt, this.sessionHistory, [currentPct]);
+			if (this.sessionHistoryResetMs === resetMs) {
+				this._applyReadings(key, resetMs, this.sessionHistory, [currentPct]);
 				return;
 			}
 			// A load for this window is in flight: queue the reading for it.
 			const pendingLoad = this._historyLoad;
-			if (pendingLoad && pendingLoad.key === key && pendingLoad.resetsAt === resetsAt) {
+			if (pendingLoad && pendingLoad.key === key && pendingLoad.resetMs === resetMs) {
 				pendingLoad.pending.push(currentPct);
 				return;
 			}
@@ -585,14 +586,14 @@
 			// window's own history loads (D5). This also ends the fast path for the old window, so a
 			// reset time going R1 -> R2 -> R1 loads R1 again instead of saving into R2's history.
 			this.sessionHistory = [];
-			this.sessionResetKey = null;
-			const load = { key, resetsAt, pending: [currentPct] };
+			this.sessionHistoryResetMs = null;
+			const load = { key, resetMs, pending: [currentPct] };
 			this._historyLoad = load;
 			const finish = (storedResetsAt, storedHistory) => {
 				if (this._historyLoad !== load) return; // superseded: reset, switched, or a newer load
 				this._historyLoad = null;
-				const base = storedResetsAt === resetsAt && Array.isArray(storedHistory) ? storedHistory : [];
-				this._applyReadings(key, resetsAt, base, load.pending);
+				const base = Date.parse(storedResetsAt) === resetMs && Array.isArray(storedHistory) ? storedHistory : [];
+				this._applyReadings(key, resetMs, base, load.pending);
 			};
 			try {
 				if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
@@ -609,7 +610,7 @@
 		}
 
 		/** Applies readings in order: a rise is appended (last 5 kept), a drop starts over. Saves once. */
-		_applyReadings(key, resetsAt, base, readings) {
+		_applyReadings(key, resetMs, base, readings) {
 			let history = [...base];
 			for (const pct of readings) {
 				const last = history[history.length - 1];
@@ -617,11 +618,11 @@
 				else if (pct > last) history = [...history, pct].slice(-5);
 			}
 			this.sessionHistory = history;
-			this.sessionResetKey = resetsAt;
+			this.sessionHistoryResetMs = resetMs;
 			this._updateSessionTooltip();
 			try {
 				if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
-					chrome.storage.local.set({ [key]: { version: 2, resets_at: resetsAt, history } });
+					chrome.storage.local.set({ [key]: { version: 2, resets_at: new Date(resetMs).toISOString(), history } });
 				}
 			} catch (e) {
 				// ignore storage errors

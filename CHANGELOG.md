@@ -13,6 +13,7 @@ Audit fixes, tracked in #1. Each item lists its issue.
 - **Backoff.** Live readings preserve the failure and free-plan retry deadlines.
 - **Expiry.** When a quota window expires in a hidden tab, showing the tab can poll immediately even if the previous answer was recent. Backoff still applies.
 - **Manual refresh.** A click waiting for a snapshot polls only if the tab is still visible when the wait ends.
+- **Session history.** Equivalent reset timestamps share one tooltip history, even when their formatting differs.
 
 ### Fixed
 - **Organisation switching (#2).**
