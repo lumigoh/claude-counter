@@ -111,6 +111,11 @@ The Session tooltip's "Recent readings" are stored per org and reset window (`cl
 These are recorded rather than fixed, because a fix would add more code than the risk justifies:
 - **Clock step.** A backward system-clock step right after a poll can drop one unlabelled reply's poll. The next scheduled poll catches up.
 - **Extra recount.** A labelled turn end that waits through start-up, followed by a switch before its recount, can cause one extra recount for the new org.
+- **Hidden reply poll (medium, pre-existing).** Hiding the tab while a reply poll waits for the snapshot can consume the reply's refresh and leave the bars unchanged until the next eligible poll.
+- **Same-millisecond reply.** A reply and a subsequent poll with the same millisecond timestamp can cause one redundant follow-up poll.
+- **Expired snapshot backfill (regression).** A restore that fills a missing window with an expired snapshot can make a newer poll answer count as stale and cause one extra request.
+- **History across tabs.** Two tabs writing history for the same org and reset window use last-writer-wins storage, so one tab's readings can be lost.
+- **Array response.** A `[]` response from `/usage` is treated as an empty free-plan answer and can postpone automatic retries for up to an hour.
 
 ## Keeping the bars in place
 

@@ -16,6 +16,14 @@ Audit fixes, tracked in #1. Each item lists its issue.
 - **Session history.** Equivalent reset timestamps share one tooltip history, even when their formatting differs.
 - **Regression tests.** Startup wait, turn-end recount, and org selection tests now fail when their expected work is skipped.
 
+### Known limits
+
+- **Hidden reply poll (medium, pre-existing).** Hiding the tab while a reply poll waits for the snapshot can consume the reply's refresh and leave the bars unchanged until the next eligible poll.
+- **Same-millisecond reply.** A reply and a subsequent poll with the same millisecond timestamp can cause one redundant follow-up poll.
+- **Expired snapshot backfill (regression).** A restore that fills a missing window with an expired snapshot can make a newer poll answer count as stale and cause one extra request.
+- **History across tabs.** Two tabs writing history for the same org and reset window use last-writer-wins storage, so one tab's readings can be lost.
+- **Array response.** A `[]` response from `/usage` is treated as an empty free-plan answer and can postpone automatic retries for up to an hour.
+
 ### Fixed
 - **Organisation switching (#2).**
   - An organisation ID seen in a page request is now only a candidate. The active organisation comes from trusted sources: the `lastActiveOrg` cookie, claude.ai's saved setting, or an org list that marks one org active.
