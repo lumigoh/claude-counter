@@ -223,12 +223,13 @@ test('M06c on the free plan the stale restore asks once and then waits an hour',
 });
 
 test('M06d a later restore (another tab saved a window) does not undo the free-plan hourly backoff (#15)', async () => {
-	const saved = { orgId: ORG, usage: { five_hour: liveWindow(71, START - HOUR), seven_day: null } };
+	const saved = { orgId: ORG, usage: { five_hour: liveWindow(71, START + 5000), seven_day: null } };
 	const env = await createMainEnv({ storage: { ...orgStored, claude_usage_state: saved }, startMs: START, usage: emptyUsage });
 	await env.clock.flush();
 	assert.equal(env.calls.usageRequests.length, 1, 'start-up confirmation; the empty answer starts the hourly backoff');
+	await env.clock.advance(6000); // the restored session window expires
 	env.chrome.storage.local.set({ [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: { expired: true }, seven_day: liveWindow(12, START + 24 * HOUR) } } });
-	await env.clock.advance(11000); // the start-up restore retry fills the weekly window
+	await env.clock.advance(5000); // the start-up restore retry fills the weekly window
 	assert.equal(env.lastUsage().seven_day.utilization, 12);
 	await env.clock.advance(30 * MIN);
 	assert.equal(env.calls.usageRequests.length, 1, 'still within the hourly backoff');
@@ -596,6 +597,23 @@ test('F04 an old-window poll arriving after expiry keeps the expired state and r
 	await env.clock.advance(MIN + 1000);
 	assert.ok(env.calls.usageRequests.length > requests);
 	assert.equal(env.lastUsage().five_hour.utilization, 1);
+});
+
+test('F04b D4: showing the tab after a hidden expiry requires a new poll', async () => {
+	const env = await createMainEnv({
+		storage: orgStored, startMs: START,
+		usage: async () => ({ five_hour: liveWindow(30, START + 20000), seven_day: liveWindow(10, START + HOUR) })
+	});
+	env.document.hidden = true;
+	await env.clock.advance(25000);
+	assert.equal(env.lastUsage().five_hour.expired, true);
+	assert.equal(env.calls.usageRequests.length, 1);
+	env.answers.usage = usefulUsage;
+	env.document.hidden = false;
+	env.document.dispatchEvent({ type: 'visibilitychange' });
+	await env.clock.flush();
+	assert.deepEqual(env.calls.usageRequests.map(({ at }) => at - START), [0, 25000]);
+	assert.equal(env.lastUsage().five_hour.utilization, 20);
 });
 
 test('F05 stale events for a retired window cannot erase a live new window', async () => {

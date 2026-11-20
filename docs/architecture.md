@@ -58,7 +58,7 @@ Quotas belong to one organisation, so everything saved is keyed by it (`claude_u
   1. Wait for start-up.
   2. Wait for the org's **ready gate**, its snapshot restore, which is set on every acceptance. If another acceptance happened meanwhile (even back to the same org), stop: that acceptance polls for itself.
   3. In one place, check hidden tab, request in flight, backoff and freshness. Only the user's click overrides backoff.
-- **D4: fresh means both windows are live.** A restored snapshot is shown at once but isn't fresh, because its age is unknown. If either window lacks a live reading, only the last poll answer counts as fresh.
+- **D4: fresh means both windows are live.** A restored snapshot is shown at once but isn't fresh, because its age is unknown. If either window lacks a live reading, freshness comes from a poll answer received since the last window expiry.
 
 - **D6: every wait in the poll path has a time limit.** Bridge readiness and start-up each have a 2 s limit. The ready gate gives the snapshot read 3 s, then polling can proceed. The bridge usage request and the direct fallback each have a 5 s limit. The fallback shares one deadline between the fetch and its body, and aborts on timeout. A direct timeout releases the in-flight slot and enters failure backoff for the active org.
 

@@ -323,7 +323,7 @@
 	const USAGE_RETRY_MS = 60 * 1000;
 	const ACTIVE_USAGE_POLL_MS = 5 * 60 * 1000;
 	let lastUsageUpdateMs = 0;
-	let lastUsageFetchMs = 0;
+	let lastFreshPollMs = 0;
 	let usageEndpointEmpty = false;
 	let usageEndpointHasData = false;
 	const isUsageBackingOff = (now) => (usageFailures || usageEndpointEmpty) && now < nextUsageAttemptMs;
@@ -360,6 +360,7 @@
 				changed = true;
 			}
 		}
+		if (changed) lastFreshPollMs = 0;
 		return changed;
 	}
 
@@ -397,7 +398,7 @@
 		if (source === 'cache') {
 			// An expired snapshot asks for fresh data at once, but only before any poll has answered or
 			// failed for this org: a restore never shortens a backoff (failure, free plan; R6).
-			if (!lastUsageFetchMs && !usageFailures && USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
+			if (!usageEndpointHasData && !usageEndpointEmpty && !usageFailures && USAGE_WINDOW_KEYS.some((key) => usageState[key]?.expired)) nextUsageAttemptMs = now;
 		} else if (source === 'sse' && !isUsageBackingOff(now)) {
 			nextUsageAttemptMs = now + (usageEndpointHasData ? ACTIVE_USAGE_POLL_MS : USAGE_POLL_MS);
 		}
@@ -430,7 +431,7 @@
 		if (switching) {
 			usageState = null;
 			lastUsageUpdateMs = 0;
-			lastUsageFetchMs = 0;
+			lastFreshPollMs = 0;
 			usageEndpointHasData = false;
 			usageEndpointEmpty = false;
 			usageFailures = 0;
@@ -530,7 +531,7 @@
 	/** Fresh means both windows hold live readings; otherwise only a poll answer counts (D4). */
 	function freshSinceMs() {
 		const bothLive = USAGE_WINDOW_KEYS.every((key) => windowFreshness[key].live);
-		return bothLive ? Math.max(lastUsageUpdateMs, lastUsageFetchMs) : lastUsageFetchMs;
+		return bothLive ? Math.max(lastUsageUpdateMs, lastFreshPollMs) : lastFreshPollMs;
 	}
 
 	async function fetchUsageDirect(orgId) {
@@ -601,8 +602,8 @@
 			return;
 		}
 		usageFailures = 0;
-		lastUsageFetchMs = Date.now();
-		nextUsageAttemptMs = lastUsageFetchMs + USAGE_POLL_MS;
+		lastFreshPollMs = Date.now();
+		nextUsageAttemptMs = lastFreshPollMs + USAGE_POLL_MS;
 
 		// Endpoint reachable but reports no windows (free plan): keep what we know, never wipe the saved snapshot.
 		const parsed = parseUsageFromUsageEndpoint(raw);
