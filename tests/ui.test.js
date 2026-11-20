@@ -558,8 +558,8 @@ test('U74 D5: equivalent reset timestamps share saved, pending and loaded histor
 	const env = createUiEnv();
 	const orgId = 'org-a-0001';
 	const key = `claude_session_history:${orgId}`;
-	const r1 = iso(START + HOUR);
-	const sameReset = r1.replace('.000Z', 'Z');
+	const r1 = iso(START + HOUR + 125);
+	const sameReset = r1.replace('.125Z', '.1250Z');
 	env.storageData[key] = { version: 2, resets_at: r1, history: [10] };
 	const reads = heldHistoryReads(env);
 	env.ui.setOrg(orgId);
@@ -572,13 +572,29 @@ test('U74 D5: equivalent reset timestamps share saved, pending and loaded histor
 	env.ui.setUsage({ five_hour: { utilization: 30, resets_at: r1 } });
 	assert.equal(reads.length, 1, 'the equivalent timestamp uses the loaded history');
 	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20% → 25% → 30%/);
+	assert.equal(env.storageData[key].resets_at, r1, 'persistent history keeps milliseconds');
+
+	const reopened = createUiEnv();
+	reopened.storageData[key] = env.storageData[key];
+	reopened.ui.setOrg(orgId);
+	reopened.ui.setUsage({ five_hour: { utilization: 35, resets_at: r1 } });
+	await reopened.clock.flush();
+	assert.deepEqual(reopened.storageData[key].history, [10, 20, 25, 30, 35]);
 });
 
-test('U75 D5: an invalid reset timestamp cannot identify a session history', () => {
+test('U75 D5: an invalid reset clears loaded session history', async () => {
 	const env = createUiEnv();
+	const orgId = 'org-a-0001';
+	const key = `claude_session_history:${orgId}`;
+	const reset = iso(START + HOUR);
+	env.ui.setOrg(orgId);
+	env.ui.setUsage({ five_hour: { utilization: 10, resets_at: reset } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: reset } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20%/);
 	const reads = heldHistoryReads(env);
-	env.ui.setOrg('org-a-0001');
-	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: 'unknown' } });
+	env.ui.setUsage({ five_hour: { utilization: 30, resets_at: 'unknown' } });
 	assert.equal(reads.length, 0);
 	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+	assert.deepEqual(env.storageData[key].history, [10, 20]);
 });

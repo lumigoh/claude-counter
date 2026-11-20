@@ -378,7 +378,15 @@ const usefulUsage = async () => ({ five_hour: liveWindow(20, START + 10 * HOUR),
 test('M57f D3: a live reading cannot shorten a paid account’s failure backoff', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
 	env.answers.usage = async () => { throw new Error('offline'); };
-	await env.clock.advance(12 * MIN);
+	await env.clock.advance(5 * MIN);
+	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.25, 3600], sevenD: null }), ORG_STREAM);
+	assert.equal(env.lastUsage().five_hour.utilization, 25);
+	await env.clock.advance(MIN - 1);
+	assert.equal(env.calls.usageRequests.length, 2);
+	await env.clock.advance(1);
+	assert.equal(env.calls.usageRequests.length, 3, 'the first failure still retries after one minute');
+
+	await env.clock.advance(6 * MIN);
 	assert.deepEqual(env.calls.usageRequests.map(({ at }) => (at - START) / MIN), [0, 5, 6, 8, 12]);
 	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: null }), ORG_STREAM);
 	assert.equal(env.lastUsage().five_hour.utilization, 30);
@@ -388,16 +396,20 @@ test('M57f D3: a live reading cannot shorten a paid account’s failure backoff'
 	assert.equal(env.calls.usageRequests.length, 6);
 });
 
-test('M57g D3: a live reading preserves the free-plan backoff deadline', async () => {
-	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
-	await env.clock.advance(30 * MIN);
-	await env.emit('cc:message_limit', limitsEvent(env.clock.now, { fiveH: [0.3, 3600], sevenD: null }), ORG_STREAM);
-	assert.equal(env.lastUsage().five_hour.utilization, 30);
-	await env.clock.advance(30 * MIN - 1);
-	assert.equal(env.calls.usageRequests.length, 1);
-	await env.clock.advance(1);
-	assert.equal(env.calls.usageRequests.length, 2);
-});
+for (const reading of ['session', 'weekly']) {
+	test(`M57g ${reading} D3: a live reading preserves the free-plan backoff deadline`, async () => {
+		const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
+		await env.clock.advance(30 * MIN);
+		const limits = reading === 'session' ? { fiveH: [0.3, 3600], sevenD: null } : { fiveH: null, sevenD: [0.3, 86400] };
+		await env.emit('cc:message_limit', limitsEvent(env.clock.now, limits), ORG_STREAM);
+		const window = reading === 'session' ? 'five_hour' : 'seven_day';
+		assert.equal(env.lastUsage()[window].utilization, 30);
+		await env.clock.advance(30 * MIN - 1);
+		assert.equal(env.calls.usageRequests.length, 1);
+		await env.clock.advance(1);
+		assert.equal(env.calls.usageRequests.length, 2);
+	});
+}
 
 test('M57a useful endpoint data is refreshed every five visible minutes', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: usefulUsage });
@@ -599,22 +611,26 @@ test('F04 an old-window poll arriving after expiry keeps the expired state and r
 	assert.equal(env.lastUsage().five_hour.utilization, 1);
 });
 
-test('F04b D4: showing the tab after a hidden expiry requires a new poll', async () => {
-	const env = await createMainEnv({
-		storage: orgStored, startMs: START,
-		usage: async () => ({ five_hour: liveWindow(30, START + 20000), seven_day: liveWindow(10, START + HOUR) })
+for (const expired of ['five_hour', 'seven_day']) {
+	test(`F04b ${expired} D4: showing the tab after a hidden expiry requires a new poll`, async () => {
+		const live = expired === 'five_hour' ? 'seven_day' : 'five_hour';
+		const env = await createMainEnv({
+			storage: orgStored, startMs: START,
+			usage: async () => ({ [expired]: liveWindow(30, START + 20000), [live]: liveWindow(10, START + HOUR) })
+		});
+		env.document.hidden = true;
+		await env.clock.advance(25000);
+		assert.equal(env.lastUsage()[expired].expired, true);
+		assert.equal(env.lastUsage()[live].utilization, 10);
+		assert.equal(env.calls.usageRequests.length, 1);
+		env.answers.usage = usefulUsage;
+		env.document.hidden = false;
+		env.document.dispatchEvent({ type: 'visibilitychange' });
+		await env.clock.flush();
+		assert.deepEqual(env.calls.usageRequests.map(({ at }) => at - START), [0, 25000]);
+		assert.equal(env.lastUsage()[expired].utilization, (await usefulUsage())[expired].utilization);
 	});
-	env.document.hidden = true;
-	await env.clock.advance(25000);
-	assert.equal(env.lastUsage().five_hour.expired, true);
-	assert.equal(env.calls.usageRequests.length, 1);
-	env.answers.usage = usefulUsage;
-	env.document.hidden = false;
-	env.document.dispatchEvent({ type: 'visibilitychange' });
-	await env.clock.flush();
-	assert.deepEqual(env.calls.usageRequests.map(({ at }) => at - START), [0, 25000]);
-	assert.equal(env.lastUsage().five_hour.utilization, 20);
-});
+}
 
 test('F05 stale events for a retired window cannot erase a live new window', async () => {
 	const env = await createMainEnv({ storage: orgStored, startMs: START, usage: emptyUsage });
@@ -662,33 +678,46 @@ test('F08 direct-fetch fallback retains the original poll freshness boundary', a
 	assert.equal(env.lastUsage().five_hour.utilization, 40);
 });
 
-test('F09 D6: a stalled snapshot releases the ready gate after three seconds', async () => {
-	let release;
+test('F09 D6: a stalled snapshot releases the gate and permits a same-org restore retry', async () => {
+	const reads = [];
+	const key = `claude_usage_state:${ORG}`;
 	const env = await createMainEnv({
-		storage: orgStored, startMs: START, usage: usefulUsage,
+		storage: orgStored, startMs: START,
+		usage: async () => ({ five_hour: liveWindow(20, START + HOUR) }),
 		beforeStart: ({ chrome }) => {
 			const get = chrome.storage.local.get;
 			chrome.storage.local.get = (keys, cb) => {
-				if (keys.includes(`claude_usage_state:${ORG}`)) release = cb;
+				if (keys.includes(key)) reads.push(cb);
 				else get(keys, cb);
 			};
 		}
 	});
+	const snapshot = (utilization) => ({
+		[key]: { version: 2, orgId: ORG, usage: { seven_day: liveWindow(utilization, START + 24 * HOUR) } }
+	});
 	env.window.dispatchEvent({ type: 'focus' });
 	await env.clock.advance(2999);
-	assert.equal(typeof release, 'function');
+	assert.equal(reads.length, 1);
 	assert.equal(env.calls.usageRequests.length, 0);
 	await env.clock.advance(1);
 	assert.equal(env.calls.usageRequests.length, 1);
 	const readings = env.calls.setUsage.length;
-	release({ [`claude_usage_state:${ORG}`]: { version: 2, orgId: ORG, usage: { five_hour: liveWindow(99, START + HOUR) } } });
+	reads[0](snapshot(99));
 	await env.clock.flush();
 	assert.equal(env.calls.setUsage.length, readings, 'the timed-out callback is ignored');
+
+	await env.clock.advance(7000);
+	assert.equal(reads.length, 2, 'the same org can retry a timed-out storage read');
+	reads[1](snapshot(13));
+	await env.clock.flush();
+	assert.equal(env.lastUsage().five_hour.utilization, 20);
+	assert.equal(env.lastUsage().seven_day.utilization, 13);
 });
 
 for (const phase of ['fetch', 'body']) {
 	test(`F10 ${phase} D6: a stalled direct /usage ${phase} aborts and enters failure backoff`, async () => {
 		let signal;
+		let resolveHeaders;
 		let readBody = false;
 		const stalled = new Promise(() => {});
 		const env = await createMainEnv({
@@ -696,12 +725,17 @@ for (const phase of ['fetch', 'body']) {
 			fetch: async (url, options) => {
 				if (!url.endsWith('/usage')) return { ok: false };
 				signal = options.signal;
-				return phase === 'fetch' ? stalled : { ok: true, json: () => { readBody = true; return stalled; } };
+				return phase === 'fetch' ? stalled : new Promise((resolve) => { resolveHeaders = resolve; });
 			}
 		});
-		assert.equal(readBody, phase === 'body');
 		assert.equal(signal?.aborted, false, 'the direct request receives a live signal');
-		await env.clock.advance(4999);
+		await env.clock.advance(4000);
+		if (phase === 'body') {
+			resolveHeaders({ ok: true, json: () => { readBody = true; return stalled; } });
+			await env.clock.flush();
+		}
+		assert.equal(readBody, phase === 'body');
+		await env.clock.advance(999);
 		assert.equal(signal.aborted, false);
 		await env.clock.advance(1);
 		assert.equal(signal.aborted, true);
@@ -715,7 +749,7 @@ for (const phase of ['fetch', 'body']) {
 	});
 }
 
-for (const change of ['switch', 'hide']) {
+for (const change of ['switch', 'switch back', 'hide']) {
 	test(`F11 ${change} D6: ${change} during a bridge poll suppresses its direct fallback`, async () => {
 		let fail;
 		const fallbacks = [];
@@ -724,14 +758,20 @@ for (const change of ['switch', 'hide']) {
 			usage: () => new Promise((resolve, reject) => { fail = reject; }),
 			fetch: async (url) => { fallbacks.push(url); return { ok: false }; }
 		});
-		if (change === 'switch') await switchOrg(env, OTHER_ORG);
-		else env.document.hidden = true;
+		if (change === 'hide') {
+			env.document.hidden = true;
+		} else {
+			await switchOrg(env, OTHER_ORG);
+			if (change === 'switch back') await switchOrg(env, ORG);
+		}
 		env.answers.usage = usefulUsage;
 		fail(new Error('bridge timeout'));
 		await env.clock.flush();
 		await env.clock.advance(1000);
 		assert.deepEqual(fallbacks, []);
-		if (change === 'switch') assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, OTHER_ORG]);
+		if (change !== 'hide') {
+			assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, change === 'switch back' ? ORG : OTHER_ORG]);
+		}
 	});
 }
 

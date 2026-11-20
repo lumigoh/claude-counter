@@ -515,25 +515,28 @@ test('O35b R4: live readings of both windows before the start-up check make its 
 	assert.equal(env.lastUsage().seven_day.utilization, 10);
 });
 
-test('O28b B5: a labelled turn end waits for start-up and recounts after the first-org refresh', async () => {
-	let messages = [{}];
-	const fetch = heldFetch();
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch, showTokenCounter: true });
-	env.answers.conversation = async () => ({ chat_messages: messages });
-	await env.clock.advance(500);
-	await env.emit('cc:turn_end', {}, { orgId: ORG, openedAt: START });
-	env.document.cookie = `lastActiveOrg=${ORG}`;
-	await env.clock.advance(1500); // the tick accepts ORG and the startup wait expires
-	assert.equal(env.calls.conversationRequests.length, 1, 'the first-org refresh has run');
-	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 10);
-	messages = [{}, {}]; // only a later recount can observe the stored reply
-	await env.clock.advance(1199);
-	assert.equal(env.calls.conversationRequests.length, 1);
-	await env.clock.advance(1);
-	assert.equal(env.calls.conversationRequests.length, 2, 'the waiting turn end triggers a second request');
-	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 20);
-	assert.equal(fetch.calls(), 1);
-});
+for (const [label, turnOrg] of [['matching', ORG], ['foreign', B]]) {
+	test(`O28b ${label} B5: a labelled turn end waits for start-up before checking its org`, async () => {
+		let messages = [{}];
+		const fetch = heldFetch();
+		const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch, showTokenCounter: true });
+		env.answers.conversation = async () => ({ chat_messages: messages });
+		await env.clock.advance(500);
+		await env.emit('cc:turn_end', {}, { orgId: turnOrg, openedAt: START });
+		env.document.cookie = `lastActiveOrg=${ORG}`;
+		await env.clock.advance(1500); // the tick accepts ORG and the startup wait expires
+		assert.equal(env.calls.conversationRequests.length, 1, 'the first-org refresh has run');
+		assert.equal(env.calls.tokenStates.at(-1).totalTokens, 10);
+		messages = [{}, {}]; // only a later recount can observe the stored reply
+		await env.clock.advance(1199);
+		assert.equal(env.calls.conversationRequests.length, 1);
+		await env.clock.advance(1);
+		const matching = turnOrg === ORG;
+		assert.equal(env.calls.conversationRequests.length, matching ? 2 : 1);
+		assert.equal(env.calls.tokenStates.at(-1).totalTokens, matching ? 20 : 10);
+		assert.equal(fetch.calls(), 1);
+	});
+}
 
 test('O37 D1: after start-up, candidates never ask the org list again, before or after an org is known', async () => {
 	let listRequests = 0;
@@ -616,14 +619,24 @@ test('O41 D2/D3: a refresh waits on startup and the snapshot, then callers share
 	const fetch = heldFetch();
 	let held;
 	let answerUsage;
+	let ready;
+	const bridgeReady = new Promise((resolve) => { ready = resolve; });
 	const env = await createMainEnv({
 		startMs: START, fetch, usage: () => new Promise((resolve) => { answerUsage = resolve; }),
-		beforeStart: (e) => { held = holdSnapshotReads(e); }
+		beforeStart: (e) => {
+			held = holdSnapshotReads(e);
+			e.context.ClaudeCounter.injectBridgeOnce = () => bridgeReady;
+		}
 	});
 	env.window.dispatchEvent({ type: 'focus' });
 	let settled = false;
 	const refresh = env.calls.uiOpts.onUsageRefresh().then(() => { settled = true; });
 	await env.clock.flush();
+	assert.equal(fetch.calls(), 0, 'even a forced refresh waits for bridge readiness before startup');
+	assert.equal(settled, false);
+	ready(true);
+	await env.clock.flush();
+	assert.equal(fetch.calls(), 1);
 	assert.equal(settled, false, 'the click waits for startup');
 	assert.equal(env.calls.usageRequests.length, 0);
 	fetch.answer([{ uuid: ORG, active: true }]);
@@ -640,16 +653,19 @@ test('O41 D2/D3: a refresh waits on startup and the snapshot, then callers share
 	assert.equal(env.calls.usageRequests.length, 1);
 });
 
-test('O42 D2: a candidate during the start-up wait does not pre-empt a list that names the active org', async () => {
-	const fetch = heldFetch();
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
-	await env.emit('cc:org_detected', { orgId: C });
-	await env.clock.advance(500);
-	fetch.answer([{ uuid: C }, { uuid: B, active: true }]);
-	await env.clock.advance(3000);
-	assert.deepEqual(env.calls.orgs, [B]);
-	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [B]);
-});
+for (const listKind of ['active', 'sole']) {
+	test(`O42 ${listKind} D2: the startup list takes precedence over a candidate`, async () => {
+		const fetch = heldFetch();
+		const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+		await env.emit('cc:org_detected', { orgId: C });
+		await env.clock.advance(500);
+		fetch.answer(listKind === 'active' ? [{ uuid: C }, { uuid: B, active: true }] : [{ uuid: B }]);
+		await env.clock.advance(3000);
+		assert.deepEqual(env.calls.orgs, [B]);
+		assert.equal(env.calls.usageRequests.length, 1);
+		assert.ok(env.calls.usageRequests.every(({ orgId }) => orgId === B));
+	});
+}
 
 test('O43 R2: when start-up found nothing, a late list answer may supply the first org', async () => {
 	const fetch = heldFetch();
@@ -660,16 +676,20 @@ test('O43 R2: when start-up found nothing, a late list answer may supply the fir
 	assert.equal(env.stored('claude_last_org_id'), B);
 });
 
-test('O44 R2: ...but never replaces an org a candidate supplied in the meantime', async () => {
-	const fetch = heldFetch();
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
-	await env.clock.advance(3000);
-	await env.emit('cc:org_detected', { orgId: ORG });
-	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
-	await env.clock.advance(3000);
-	assert.deepEqual(env.calls.orgs, [ORG]);
-	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
-});
+for (const listKind of ['active', 'sole']) {
+	test(`O44 ${listKind} D2: a late list can supply a sole org but cannot replace an accepted candidate`, async () => {
+		const fetch = heldFetch();
+		const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+		await env.clock.advance(3000);
+		if (listKind === 'active') await env.emit('cc:org_detected', { orgId: ORG });
+		fetch.answer(listKind === 'active' ? [{ uuid: ORG }, { uuid: B, active: true }] : [{ uuid: B }]);
+		await env.clock.advance(3000);
+		const expected = listKind === 'active' ? ORG : B;
+		assert.deepEqual(env.calls.orgs, [expected]);
+		assert.equal(env.calls.usageRequests.length, 1);
+		assert.ok(env.calls.usageRequests.every(({ orgId }) => orgId === expected));
+	});
+}
 
 test('O45 D3: A -> B -> A while restores are held: the old A poll waits for the new A snapshot', async () => {
 	let held = null;
@@ -689,84 +709,104 @@ test('O45 D3: A -> B -> A while restores are held: the old A poll waits for the 
 	assert.equal(env.lastUsage().five_hour.utilization, 41);
 });
 for (const pending of ['list', 'remembered']) {
-	test(`O46 ${pending} D2: a newer cookie beats the org accepted while awaiting ${pending}`, async () => {
-		const fetch = heldFetch();
-		let remembered;
-		const env = await createMainEnv({
-			startMs: START, usage: emptyUsage,
-			fetch: pending === 'list' ? fetch : list({ uuid: ORG }, { uuid: B }),
-			beforeStart: ({ chrome }) => {
-				if (pending !== 'remembered') return;
-				const get = chrome.storage.local.get;
-				chrome.storage.local.get = (keys, cb) => {
-					if (keys.includes('claude_last_org_id')) remembered = cb;
-					else get(keys, cb);
-				};
-			}
+	for (const cookie of ['newer', 'removed']) {
+		test(`O46 ${pending} ${cookie} D2: a startup answer respects trusted orgs`, async () => {
+			const fetch = heldFetch();
+			let remembered;
+			const env = await createMainEnv({
+				startMs: START, usage: emptyUsage,
+				fetch: pending === 'list' ? fetch : list({ uuid: ORG }, { uuid: B }),
+				beforeStart: ({ chrome }) => {
+					if (pending !== 'remembered') return;
+					const get = chrome.storage.local.get;
+					chrome.storage.local.get = (keys, cb) => {
+						if (keys.includes('claude_last_org_id')) remembered = cb;
+						else get(keys, cb);
+					};
+				}
+			});
+			await switchCookie(env, ORG);
+			env.document.cookie = cookie === 'newer' ? `lastActiveOrg=${B}` : '';
+			if (pending === 'list') fetch.answer([{ uuid: C, active: true }]);
+			else remembered({ claude_last_org_id: C });
+			await env.clock.flush();
+			assert.deepEqual(env.calls.orgs, cookie === 'newer' ? [ORG, B] : [ORG]);
+			assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [cookie === 'newer' ? B : ORG]);
 		});
-		await switchCookie(env, ORG);
-		env.document.cookie = `lastActiveOrg=${B}`; // newer than the tick's choice
-		if (pending === 'list') fetch.answer([{ uuid: C, active: true }]);
-		else remembered({ claude_last_org_id: C });
-		await env.clock.flush();
-		assert.deepEqual(env.calls.orgs, [ORG, B]);
-		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [B]);
-	});
+	}
 }
-
-test('O47 D2: a cookie present when a late list answers is accepted immediately', async () => {
-	const fetch = heldFetch();
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
-	await env.clock.advance(2100);
-	env.document.cookie = `lastActiveOrg=${B}`;
-	fetch.answer([{ uuid: C, active: true }]);
-	await env.clock.flush();
-	assert.deepEqual(env.calls.orgs, [B]);
-	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [B]);
-});
 
 for (const known of [false, true]) {
-	test(`O48 ${known ? 'known' : 'unknown'} D1: a candidate prompts an immediate trusted read`, async () => {
-		const env = await createMainEnv({
-			startMs: START, usage: emptyUsage, cookie: known ? `lastActiveOrg=${ORG}` : ''
-		});
+	test(`O47 ${known ? 'known' : 'unknown'} D2: a cookie present when a late list answers is accepted immediately`, async () => {
+		const fetch = heldFetch();
+		const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
+		await env.clock.advance(2100);
+		if (known) {
+			await env.emit('cc:org_detected', { orgId: ORG });
+			await env.clock.flush();
+		}
 		env.document.cookie = `lastActiveOrg=${B}`;
-		await env.emit('cc:org_detected', { orgId: C });
+		fetch.answer([{ uuid: C, active: true }]);
 		await env.clock.flush();
-		assert.deepEqual(env.calls.orgs, known ? [ORG, B] : [B]);
-		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), known ? [ORG, B] : [B]);
+		const expected = known ? [ORG, B] : [B];
+		assert.deepEqual(env.calls.orgs, expected);
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), expected);
 	});
 }
 
-test('O49 D3: a click pending on a snapshot cannot poll a hidden tab', async () => {
-	let held;
-	const env = await createMainEnv({
-		cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage,
-		beforeStart: (e) => { held = holdSnapshotReads(e); }
-	});
-	held.shift()();
-	await env.clock.flush();
-	await switchCookie(env, B);
-	const click = env.calls.uiOpts.onUsageRefresh();
-	await env.clock.flush();
-	env.document.hidden = true;
-	held.shift()();
-	await click;
-	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
+for (const known of [false, true]) {
+	for (const candidate of [B, C]) {
+		test(`O48 ${known ? 'known' : 'unknown'} ${candidate === B ? 'matching' : 'different'} D1: a candidate prompts an immediate trusted read`, async () => {
+			const env = await createMainEnv({
+				startMs: START, usage: emptyUsage, cookie: known ? `lastActiveOrg=${ORG}` : ''
+			});
+			env.document.cookie = `lastActiveOrg=${B}`;
+			await env.emit('cc:org_detected', { orgId: candidate });
+			await env.clock.flush();
+			assert.deepEqual(env.calls.orgs, known ? [ORG, B] : [B]);
+			assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), known ? [ORG, B] : [B]);
+		});
+	}
+}
 
-	env.document.hidden = false;
-	env.document.dispatchEvent({ type: 'visibilitychange' });
-	await env.clock.flush();
-	await env.calls.uiOpts.onUsageRefresh();
-	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, B, B], 'a visible click still bypasses backoff');
-});
+for (const backoff of ['empty plan', 'failure']) {
+	test(`O49 ${backoff} D3: a click respects visibility and bypasses backoff`, async () => {
+		let held;
+		const env = await createMainEnv({
+			cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage,
+			beforeStart: (e) => { held = holdSnapshotReads(e); }
+		});
+		held.shift()();
+		await env.clock.flush();
+		await switchCookie(env, B);
+		const click = env.calls.uiOpts.onUsageRefresh();
+		await env.clock.flush();
+		env.document.hidden = true;
+		held.shift()();
+		await click;
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
 
-test('O50 D2: trusted startup makes zero org-list requests', async () => {
-	let listRequests = 0;
-	const env = await createMainEnv({
-		cookie: `lastActiveOrg=${ORG}`, startMs: START, usage: emptyUsage,
-		fetch: async () => { listRequests++; return { ok: false }; }
+		if (backoff === 'failure') env.answers.usage = async () => { throw new Error('offline'); };
+		env.document.hidden = false;
+		env.document.dispatchEvent({ type: 'visibilitychange' });
+		await env.clock.flush();
+		env.window.dispatchEvent({ type: 'focus' });
+		await env.clock.flush();
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, B], 'focus still respects backoff');
+		await env.calls.uiOpts.onUsageRefresh();
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG, B, B], 'a visible click still bypasses backoff');
 	});
-	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
-	assert.equal(listRequests, 0);
-});
+}
+
+for (const source of ['cookie', 'page storage']) {
+	test(`O50 ${source} D2: trusted startup makes zero org-list requests`, async () => {
+		let listRequests = 0;
+		const trusted = source === 'cookie' ? { cookie: `lastActiveOrg=${ORG}` } : { pageStorage: { currentOrganizationId: ORG } };
+		const env = await createMainEnv({
+			...trusted, startMs: START, usage: emptyUsage,
+			fetch: async () => { listRequests++; return { ok: false }; }
+		});
+		assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
+		assert.equal(listRequests, 0);
+	});
+}
