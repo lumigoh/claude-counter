@@ -515,20 +515,25 @@ test('O35b R4: live readings of both windows before the start-up check make its 
 	assert.equal(env.lastUsage().seven_day.utilization, 10);
 });
 
-test('O28b a start-up still waiting for the list resolves when the cookie tick accepts an org (B5, R1)', async () => {
+test('O28b B5: a labelled turn end waits for start-up and recounts after the first-org refresh', async () => {
 	let messages = [{}];
 	const fetch = heldFetch();
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch, showTokenCounter: true, conversations: {} });
+	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch, showTokenCounter: true });
 	env.answers.conversation = async () => ({ chat_messages: messages });
-	await env.clock.advance(3000); // past the 2 s wait, nothing to choose: start-up keeps waiting
-	await env.emit('cc:turn_end', {}, { orgId: ORG, openedAt: START }); // waits for the org
+	await env.clock.advance(500);
+	await env.emit('cc:turn_end', {}, { orgId: ORG, openedAt: START });
 	env.document.cookie = `lastActiveOrg=${ORG}`;
-	messages = [{}, {}];
-	await env.clock.advance(4000); // the tick accepts ORG; the waiting turn end recounts
-	assert.equal(env.calls.tokenStates.at(-1)?.totalTokens, 20);
-	assert.equal(fetch.calls(), 1, 'the stalled list is never asked again');
+	await env.clock.advance(1500); // the tick accepts ORG and the startup wait expires
+	assert.equal(env.calls.conversationRequests.length, 1, 'the first-org refresh has run');
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 10);
+	messages = [{}, {}]; // only a later recount can observe the stored reply
+	await env.clock.advance(1199);
+	assert.equal(env.calls.conversationRequests.length, 1);
+	await env.clock.advance(1);
+	assert.equal(env.calls.conversationRequests.length, 2, 'the waiting turn end triggers a second request');
+	assert.equal(env.calls.tokenStates.at(-1).totalTokens, 20);
+	assert.equal(fetch.calls(), 1);
 });
-
 
 test('O37 D1: after start-up, candidates never ask the org list again, before or after an org is known', async () => {
 	let listRequests = 0;
@@ -607,14 +612,32 @@ test('O40 D4: a session-only reading in a hidden tab does not make the poll on s
 	assert.equal(env.lastUsage().seven_day.utilization, 12);
 });
 
-test('O41 D2/D3: a poll waiting on start-up does not poll again after acceptance already did (free plan)', async () => {
+test('O41 D2/D3: a refresh waits on startup and the snapshot, then callers share one poll', async () => {
 	const fetch = heldFetch();
-	const env = await createMainEnv({ startMs: START, usage: emptyUsage, fetch });
-	await env.clock.advance(500);
-	env.window.dispatchEvent({ type: 'focus' }); // joins the start-up wait
-	env.document.cookie = `lastActiveOrg=${ORG}`;
-	await env.clock.advance(5000); // the tick accepts at 1 s; start-up settles at 2 s
-	assert.equal(env.calls.usageRequests.length, 1, 'the empty answer starts the hourly backoff');
+	let held;
+	let answerUsage;
+	const env = await createMainEnv({
+		startMs: START, fetch, usage: () => new Promise((resolve) => { answerUsage = resolve; }),
+		beforeStart: (e) => { held = holdSnapshotReads(e); }
+	});
+	env.window.dispatchEvent({ type: 'focus' });
+	let settled = false;
+	const refresh = env.calls.uiOpts.onUsageRefresh().then(() => { settled = true; });
+	await env.clock.flush();
+	assert.equal(settled, false, 'the click waits for startup');
+	assert.equal(env.calls.usageRequests.length, 0);
+	fetch.answer([{ uuid: ORG, active: true }]);
+	await env.clock.flush();
+	assert.equal(held.length, 1, 'startup reached the snapshot gate');
+	assert.equal(settled, false, 'the click also waits for the snapshot');
+	assert.equal(env.calls.usageRequests.length, 0);
+	held.shift()();
+	await env.clock.flush();
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
+	answerUsage(await emptyUsage());
+	await refresh;
+	await env.clock.flush();
+	assert.equal(env.calls.usageRequests.length, 1);
 });
 
 test('O42 D2: a candidate during the start-up wait does not pre-empt a list that names the active org', async () => {
@@ -624,8 +647,8 @@ test('O42 D2: a candidate during the start-up wait does not pre-empt a list that
 	await env.clock.advance(500);
 	fetch.answer([{ uuid: C }, { uuid: B, active: true }]);
 	await env.clock.advance(3000);
-	assert.equal(env.stored('claude_last_org_id'), B);
-	assert.ok(env.calls.usageRequests.every((r) => r.orgId === B));
+	assert.deepEqual(env.calls.orgs, [B]);
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [B]);
 });
 
 test('O43 R2: when start-up found nothing, a late list answer may supply the first org', async () => {
@@ -644,8 +667,8 @@ test('O44 R2: ...but never replaces an org a candidate supplied in the meantime'
 	await env.emit('cc:org_detected', { orgId: ORG });
 	fetch.answer([{ uuid: ORG }, { uuid: B, active: true }]);
 	await env.clock.advance(3000);
-	assert.equal(env.stored('claude_last_org_id'), ORG);
-	assert.ok(env.calls.usageRequests.every((r) => r.orgId === ORG));
+	assert.deepEqual(env.calls.orgs, [ORG]);
+	assert.deepEqual(env.calls.usageRequests.map(({ orgId }) => orgId), [ORG]);
 });
 
 test('O45 D3: A -> B -> A while restores are held: the old A poll waits for the new A snapshot', async () => {
