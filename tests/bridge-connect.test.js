@@ -21,9 +21,14 @@ test.afterEach(() => {
 	assert.deepEqual(unhandled.splice(0), [], 'unhandled rejection');
 });
 
-async function runStream(chunks, { contentType } = {}) {
+// The stream "opens" just after the reply limits_5h_first (1791743967525-0) was recorded, so it and
+// the later limits_5h_first_turn2 count as live replies rather than replays (#4).
+const RECORDED_NOW = 1791743968000;
+
+async function runStream(chunks, { contentType, nowMs = RECORDED_NOW } = {}) {
 	let response;
 	const env = createBridgeEnv({
+		nowMs,
 		originalFetch: async () => {
 			response = streamResponse(chunks, { contentType });
 			return response;
@@ -187,9 +192,12 @@ test('T10 repeated limits events: delivered each time, identical values are fine
 });
 
 test('T10b the same event sent again (stream reopened) is not a new reply, a new event with identical limits is', async () => {
-	// same event twice in one stream, and again in a second stream of the same page
+	// same event twice in one stream, and again in a second stream of the same page. Cross-stream
+	// replay detection needs the org label (cookie); unlabelled streams keep separate state (#11).
 	let response;
 	const env = createBridgeEnv({
+		nowMs: RECORDED_NOW,
+		cookie: 'lastActiveOrg=fda3f0e1-4fb4-4c97-97f9-c2274f34ec6d',
 		originalFetch: async () => {
 			response = streamResponse([frame('limits_5h_first'), frame('limits_5h_first')]);
 			return response;
@@ -407,7 +415,8 @@ test('T15b conversation request: a real conversation is delivered and answered',
 	await settle(30);
 	const reply = env.messages.find((m) => m.type === 'cc:response' && m.requestId === id);
 	assert.equal(reply.ok, true);
-	assert.equal(env.events('cc:conversation').length, 1);
+	assert.deepEqual(reply.payload, body, 'the conversation reaches the requester in the response');
+	assert.equal(env.events('cc:conversation').length, 0, 'it is not broadcast a second time (#6)');
 });
 
 test('T57 Request objects retain POST generation detection and top-level SSE limits are read', async () => {
@@ -438,24 +447,32 @@ test('F10 stream freshness is independent for session, weekly, and reset windows
 		quotaFrame('2000-10', [['5h', 1, 1791749400, 0.4]]),
 		quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39], ['7d', 1, 1791990000, 0.2]]),
 		quotaFrame('500-1', [['5h', 1, 1791849400, 0.01]])
-	]);
+	], { nowMs: Date.now() }); // real time: the first recorded 5h window has already reset
 	assert.deepEqual(Object.keys(limits(env)[1].windows), ['7d']);
 	assert.equal(limits(env)[2].windows['5h'].utilization, 0.01, 'a different reset window has its own watermark');
 });
 
-test('F11 an unknown organisation becoming known retains its stream watermark', async () => {
-	const frames = [quotaFrame('2000-1', [['5h', 1, 1791749400, 0.4]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39]])];
-	const env = createBridgeEnv({ originalFetch: async (url) => String(url).includes('StreamTimeline') ? streamResponse([frames.shift()]) : new Response('{}') });
+test('F11 a stream reopened under the same org keeps its watermark; another org does not inherit it', async () => {
+	// Rewritten for 2.1.8 post-audit (#13): the old version used IDs that fail isPlausibleOrgId and
+	// passed even with one global cursor key.
+	const A = 'aaaaaaaa-1111-4111-8111-111111111111';
+	const Borg = 'bbbbbbbb-2222-4222-8222-222222222222';
+	const frames = [quotaFrame('2000-1', [['5h', 1, 1791749400, 0.4]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.39]]), quotaFrame('1000-1', [['5h', 1, 1791749400, 0.05]])];
+	const env = createBridgeEnv({ cookie: `lastActiveOrg=${A}`, originalFetch: async () => streamResponse([frames.shift()]) });
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
-	await env.fetch('https://claude.ai/api/organizations/org-a/usage');
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
-	assert.equal(limits(env).length, 1);
+	assert.equal(limits(env).length, 1, 'an older cursor in a reopened stream of the same org is a replay');
+	env.document.cookie = `lastActiveOrg=${Borg}`;
+	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
+	assert.equal(limits(env).length, 2, 'the same cursor value in another org is new');
 });
 
-test('F12 switching organisations separates cursors and drops frames from the old open stream', async () => {
+test('F12 organisations keep separate cursors; an old stream keeps its own label for the content script to judge', async () => {
+	// 2.1.8 (#2): the bridge no longer drops streams when another ID appears. Labels come from the
+	// lastActiveOrg cookie at open time; main.js drops messages whose label is not the active org.
 	let oldController;
 	let openOld = true;
-	const env = createBridgeEnv({ originalFetch: async (url) => {
+	const env = createBridgeEnv({ cookie: 'lastActiveOrg=org-a-0001', originalFetch: async (url) => {
 		if (!String(url).includes('StreamTimeline')) return new Response('{}');
 		if (openOld) {
 			openOld = false;
@@ -463,14 +480,13 @@ test('F12 switching organisations separates cursors and drops frames from the ol
 		}
 		return streamResponse([quotaFrame('2000-1', [['5h', 1, 1791749400, 0.1]])]);
 	} });
-	await env.fetch('https://claude.ai/api/organizations/org-a/usage');
 	const old = await env.fetch(STREAM_URL, { method: 'POST' }); await settle();
-	await env.fetch('https://claude.ai/api/organizations/org-b/usage');
+	env.document.cookie = 'lastActiveOrg=org-b-0002';
 	await readAll(await env.fetch(STREAM_URL, { method: 'POST' })); await settle();
 	oldController.enqueue(quotaFrame('3000-1', [['5h', 1, 1791749400, 0.41]])); oldController.close();
 	await readAll(old); await settle();
-	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4, 0.1]);
-	assert.equal(env.messages.filter((m) => m.type === 'cc:message_limit').at(-1).meta.orgId, 'org-b');
+	const sent = env.messages.filter((m) => m.type === 'cc:message_limit').map((m) => [m.meta.orgId, m.payload.windows['5h'].utilization]);
+	assert.deepEqual(sent, [['org-a-0001', 0.4], ['org-b-0002', 0.1], ['org-a-0001', 0.41]], 'the same cursor in org-b-0002 is not a replay of org-a-0001');
 });
 
 test('F13 missing or slightly changed future reset times cannot bypass a newer cursor', async () => {
@@ -481,4 +497,33 @@ test('F13 missing or slightly changed future reset times cannot bypass a newer c
 		proto.connectFrame(0, proto.encodeFields([[1, 'm', [[10, 'm', [[1, 's', '1000-1']]], [11, 'v', 2], [4, 'm', [[13, 'm', [[1, 's', '5h'], [2, 'm', [[3, 'd', 0.38]]]]]]]]]]))
 	]);
 	assert.deepEqual(limits(env).map((m) => m.windows['5h'].utilization), [0.4]);
+});
+
+test('T16 a limits event older than its stream is a replay: limits are delivered, no turn end (#4)', async () => {
+	const opened = 1791744121000;
+	const old = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened - 10 * 60 * 1000}-0`, windows: [['5h', 1, 1791749400, 0.5]] }));
+	const live = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened + 30 * 1000}-0`, windows: [['5h', 1, 1791749400, 0.51]] }));
+	const skewed = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened - 30 * 1000}-1`, windows: [['7d', 1, 1791990000, 0.2]] }));
+	const { env } = await runStream([old], { nowMs: opened });
+	assert.equal(limits(env).length, 1, 'the replayed snapshot still updates the bars');
+	assert.equal(env.events('cc:turn_end').length, 0, 'but it is not a finished reply');
+	const { env: env2 } = await runStream([old, live], { nowMs: opened });
+	assert.equal(env2.events('cc:turn_end').length, 1, 'a reply newer than the stream is');
+	const { env: env3 } = await runStream([skewed], { nowMs: opened });
+	assert.equal(env3.events('cc:turn_end').length, 1, 'small clock differences are tolerated');
+});
+
+test('T16b the replay cut-off is exactly 120 s before the stream opened (#13)', async () => {
+	// Documented edges: a reload within 120 s of a reply counts it as live; a client clock more than
+	// 120 s ahead of the server's suppresses live turns early in a stream.
+	const opened = 1791744121000;
+	const endsFor = async (ageMs) => {
+		const f = proto.connectFrame(0, proto.limitsPayload({ cursor: `${opened - ageMs}-0`, windows: [['5h', 1, 1791749400, 0.5]] }));
+		const { env } = await runStream([f], { nowMs: opened });
+		assert.equal(limits(env).length, 1, `${ageMs} ms: limits always delivered`);
+		return env.events('cc:turn_end').length;
+	};
+	assert.equal(await endsFor(119999), 1, '119 999 ms old: live');
+	assert.equal(await endsFor(120000), 1, '120 000 ms old: still live');
+	assert.equal(await endsFor(120001), 0, '120 001 ms old: replay');
 });

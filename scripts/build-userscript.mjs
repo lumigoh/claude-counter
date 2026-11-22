@@ -30,9 +30,14 @@ const storageAdapter = read('userscript/storage-adapter.js');
 const early = ['src/injected/bridge.js', 'src/content/constants.js', 'src/content/bridge-client.js', 'src/content/tokens.js', 'src/content/token-counter.js'];
 const browserUI = ['src/content/ui.js', 'src/content/main.js'];
 const section = (file) => `\n// Source: ${file}\n${read(file).trim()}\n`;
+// The userscript runs in the page world. The vendored tokenizer is a UMD bundle: if the page has an
+// AMD loader (define.amd) or CommonJS-looking globals, it would register itself there and never create
+// GPTTokenizer_o200k_base. Shadowing those names in this block makes it take the global path (#6).
+// The extension is unaffected: it imports the file in the isolated content-script world.
 const lazyTokenizer = `
 ClaudeCounter.loadUserscriptTokenizer = async () => {
 if (!globalThis.GPTTokenizer_o200k_base) {
+const define = undefined, exports = undefined, module = undefined;
 ${read('src/vendor/o200k_base.js')}
 }
 };

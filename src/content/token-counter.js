@@ -16,7 +16,7 @@
 	};
 
 	class OptionalTokenCounter {
-		constructor({ ui, bridgeReady, getOrgId }) {
+		constructor({ ui, bridgeReady, getOrgId, onActiveOrgChange }) {
 			this.ui = ui;
 			this.bridgeReady = bridgeReady;
 			this.getOrgId = getOrgId;
@@ -24,7 +24,12 @@
 			this.revision = 0;
 			this.turnRevision = 0;
 			this.messageCount = 0;
-			CC.bridge.on('cc:turn_end', () => this._afterTurn());
+			// A turn end labelled with another organisation is not this chat's reply (#11). Unlabelled
+			// ones (cookie unreadable) still recount: a recount always fetches the active org's current
+			// chat, so it cannot show wrong numbers.
+			CC.bridge.on('cc:turn_end', (payload, meta) => {
+				this._onTurnEnd(meta).catch(() => {});
+			});
 			const navigate = () => {
 				this.revision++;
 				this.turnRevision++;
@@ -33,16 +38,27 @@
 				this._render();
 				if (this.enabled) this.refresh();
 			};
-			CC.bridge.on('cc:org_detected', (payload) => {
-				if (!payload?.orgId) return;
-				const switched = this.lastOrgId && payload.orgId !== this.lastOrgId;
-				this.lastOrgId = payload.orgId;
+			// Follow the content script's *active* organisation (issue #2). IDs merely seen in page
+			// requests are not switches; reacting to them used to throw away valid counts.
+			this.activeOrgId = null;
+			onActiveOrgChange?.((orgId, previous) => {
+				this.activeOrgId = orgId;
 				if (!this.enabled) return;
-				if (switched) navigate();
+				if (previous) navigate();
 				else if (!this.hasCount) this.refresh();
 			});
-			window.addEventListener('cc:urlchange', navigate);
-			window.addEventListener('popstate', navigate);
+			// claude.ai rewrites history (query strings, state) without leaving the chat. Every such
+			// event used to cancel the count and download the whole conversation again; only a
+			// different chat is a navigation for the counter (#4).
+			this.lastChatId = this._chatId();
+			const onLocation = () => {
+				const chatId = this._chatId();
+				if (chatId === this.lastChatId) return;
+				this.lastChatId = chatId;
+				navigate();
+			};
+			window.addEventListener('cc:urlchange', onLocation);
+			window.addEventListener('popstate', onLocation);
 			document.addEventListener('click', (event) => {
 				if (!this.enabled || !event.target?.closest?.('button[aria-label="Previous"], button[aria-label="Next"]')) return;
 				clearTimeout(this.branchTimer);
@@ -51,6 +67,8 @@
 			this.setEnabled(CC.config?.showTokenCounter === true);
 		}
 
+		// Chat conversations only. Claude Code sessions (/code/<id>) are not chat_conversations and
+		// cannot be fetched and counted the same way, so the counter stays hidden there (#7).
 		_chatId() {
 			return window.location.pathname.match(/\/chat\/([^/?]+)/)?.[1] || null;
 		}
@@ -86,7 +104,6 @@
 					const orgId = await this.getOrgId();
 					if (!current()) return null;
 					if (!orgId) throw new Error('Organisation unavailable');
-					this.lastOrgId = orgId;
 					const data = await CC.bridge.requestConversation(orgId, chatId);
 					if (!current()) return null;
 					if (!Array.isArray(data?.chat_messages)) throw new Error('Conversation unavailable');
@@ -104,6 +121,17 @@
 			})();
 			this.inFlight = request;
 			return request.promise;
+		}
+
+		// A labelled turn end can only be judged once the active org is known; before the first org is
+		// accepted, wait for it instead of dropping a valid turn end (#16).
+		async _onTurnEnd(meta) {
+			if (!this.enabled) return;
+			if (meta?.orgId) {
+				const active = this.activeOrgId || (await this.getOrgId());
+				if (active && meta.orgId !== active) return;
+			}
+			this._afterTurn();
 		}
 
 		_afterTurn() {

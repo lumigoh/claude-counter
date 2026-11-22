@@ -89,6 +89,7 @@ function createContentEnv({ files, storage = {}, pathname = '/chat/00000000-0000
 		Error,
 		Symbol,
 		URL,
+		AbortController,
 		crypto: require('crypto').webcrypto,
 		fetch: async () => {
 			throw new Error('fetch is not available in tests');

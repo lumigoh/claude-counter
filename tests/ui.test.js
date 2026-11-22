@@ -255,3 +255,346 @@ test('U55 token counter is hidden initially and appears before the quota groups 
 	env.ui.setTokenCounter({ enabled: false, active: true });
 	assert.equal(env.ui.tokenDisplay.classList.contains('cc-hidden'), true);
 });
+
+test('U58 a burst of page mutations costs one composer scan, after a short pause (#3)', async () => {
+	const env = createUiEnv();
+	env.dom.buildComposer();
+	env.ui.attach();
+	let scans = 0;
+	const find = env.ui._findComposerBox.bind(env.ui);
+	env.ui._findComposerBox = () => { scans++; return find(); };
+	const unrelated = env.document.createElement('p');
+	env.document.body.appendChild(unrelated);
+	for (let i = 0; i < 100; i++) {
+		for (const observer of env.dom.observers) observer.cb([{ type: 'childList', target: unrelated }]);
+	}
+	assert.equal(scans, 0, 'no layout reads inside the observer callback');
+	await env.clock.advance(150);
+	assert.equal(scans, 1, 'one scan for the whole burst');
+
+	// A batch mixing our own node with a page node is page work and must be checked (#13).
+	for (const observer of env.dom.observers) observer.cb([{ type: 'attributes', target: env.ui.sessionBarFill }, { type: 'childList', target: unrelated }]);
+	await env.clock.advance(150);
+	assert.equal(scans, 2);
+});
+
+test('U59 mutations of the extension\'s own nodes schedule nothing (#3)', async () => {
+	const env = createUiEnv();
+	env.dom.buildComposer();
+	env.ui.attach();
+	let scans = 0;
+	const find = env.ui._findComposerBox.bind(env.ui);
+	env.ui._findComposerBox = () => { scans++; return find(); };
+	for (const observer of env.dom.observers) observer.cb([{ type: 'attributes', target: env.ui.sessionBarFill }]);
+	await env.clock.advance(150);
+	assert.equal(scans, 0);
+});
+
+test('U60 recent session readings are kept per organisation; the old shared key is ignored (#6)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	env.storageData.claude_session_history = { version: 2, resets_at, history: [10, 20] };
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at } });
+	await env.clock.flush();
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 40% → 45%/, 'the shared legacy history is not mixed in');
+	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [40, 45]);
+	env.ui.setOrg('org-b-0002');
+	env.ui.setUsage({ five_hour: { utilization: 50, resets_at } });
+	await env.clock.flush();
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/, 'org B does not inherit org A readings');
+	assert.deepEqual(env.storageData['claude_session_history:org-b-0002'].history, [50]);
+	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [40, 45]);
+});
+
+test('U61 Session and Weekly are keyboard buttons that refresh and describe themselves (#6)', async () => {
+	const env = createUiEnv();
+	for (const [group, tooltip] of [[env.ui.sessionGroup, env.ui.sessionTooltip], [env.ui.weeklyGroup, env.ui.weeklyTooltip]]) {
+		assert.equal(group.getAttribute('role'), 'button');
+		assert.equal(group.getAttribute('tabindex'), '0');
+		assert.ok(tooltip.id, 'the tooltip has an id');
+		assert.equal(group.getAttribute('aria-describedby'), tooltip.id);
+	}
+	assert.equal(env.ui.tokenDisplay.getAttribute('aria-describedby'), env.ui.tokenTooltip.id);
+	const press = async (group, key, extra = {}) => {
+		let prevented = false;
+		for (const fn of group.listeners.keydown) await fn({ key, preventDefault: () => { prevented = true; }, ...extra });
+		return prevented;
+	};
+	for (const group of [env.ui.sessionGroup, env.ui.weeklyGroup]) {
+		const before = env.refreshes.length;
+		assert.equal(await press(group, 'Enter'), true);
+		assert.equal(await press(group, ' '), true);
+		assert.equal(env.refreshes.length, before + 2);
+		assert.equal(await press(group, 'a'), false);
+		// Held keys and shortcuts belong to the browser or page, not to a refresh (C3, #12).
+		// A held key is still ours (no scrolling) but refreshes only once (#14).
+		assert.equal(await press(group, ' ', { repeat: true }), true, 'held Space never scrolls the page');
+		assert.equal(await press(group, 'Enter', { repeat: true }), true);
+		for (const extra of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }]) {
+			assert.equal(await press(group, 'Enter', extra), false, JSON.stringify(extra));
+			assert.equal(await press(group, ' ', extra), false, `Space ${JSON.stringify(extra)}`);
+		}
+		assert.equal(env.refreshes.length, before + 2);
+	}
+});
+
+test('U62 tooltips appear on keyboard focus and hide on blur or Escape (#6, #12)', () => {
+	const env = createUiEnv();
+	for (const group of [env.ui.sessionGroup, env.ui.weeklyGroup]) {
+		const tooltip = group === env.ui.sessionGroup ? env.ui.sessionTooltip : env.ui.weeklyTooltip;
+		group.matches = (selector) => selector === ':focus-visible'; // keyboard focus
+		for (const fn of group.listeners.focus) fn({});
+		assert.equal(tooltip.style.visibility, 'visible');
+		for (const fn of group.listeners.blur) fn({});
+		assert.equal(tooltip.style.visibility, 'hidden');
+		for (const fn of group.listeners.focus) fn({});
+		env.fireWindow('keydown', { key: 'Escape' });
+		assert.equal(tooltip.style.visibility, 'hidden', 'Escape dismisses it');
+	}
+});
+
+test('U67 a touch tap that focuses a quota button does not pin its tooltip open (C1, #12)', () => {
+	const env = createUiEnv();
+	env.ui.weeklyGroup.matches = () => false; // focus without :focus-visible, as after a tap
+	for (const fn of env.ui.weeklyGroup.listeners.focus) fn({});
+	assert.notEqual(env.ui.weeklyTooltip.style.visibility, 'visible');
+});
+
+test('U68 a pending history read for an org is ignored once a newer update for that org ran (C2, #12)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.storageData[key] = { version: 2, resets_at, history: [10] };
+	const reads = [];
+	const get = env.chrome.storage.local.get;
+	env.chrome.storage.local.get = (keys, cb) => reads.push(() => get(keys, cb));
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } }); // read 1, held
+	env.ui.setOrg('org-b-0002');
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at } }); // read 2, held
+	reads[1]();
+	await env.clock.flush(); // storage answers asynchronously
+	env.ui.setUsage({ five_hour: { utilization: 50, resets_at } });
+	reads[0](); // the stale read finishes last
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 45, 50]);
+	assert.match(env.ui.sessionTooltip.textContent, /10% → 45% → 50%/);
+});
+
+test('U66 the fade route table (C4, #12)', () => {
+	const { isConversationPage } = createUiEnv().CC.ui;
+	const cases = {
+		'/chat/d017d8c7': true,
+		'/project/p1/chat/d017d8c7': true, // nested chat routes matched in 2.1.7 and still do
+		'/code/session_01PWd9m9bo3k1fLhqDAJHu8w': true,
+		'/chat/': false,
+		'/code': false,
+		'/code/': false,
+		'/code/new': false,
+		'/new': false,
+		'/': false,
+		'/projects': false
+	};
+	for (const [path, expected] of Object.entries(cases)) assert.equal(isConversationPage(path), expected, path);
+});
+
+test('U63 Spanish pages get whole tooltips and token texts in Spanish, not just the labels (#6)', async () => {
+	const env = createUiEnv({ lang: 'es-ES' });
+	const english = /quota|used|remaining|Resets|local time|Click|No data|Recent|Fill|Counting|unavailable|Approximate|Reset time/;
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, english);
+	assert.match(env.ui.sessionTooltip.textContent, /Cuota de sesión · 5 horas/);
+	const resets_at = iso(START + HOUR);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at }, seven_day: { expired: true } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 45, resets_at }, seven_day: { expired: true } });
+	await env.clock.flush();
+	for (const tip of [env.ui.sessionTooltip, env.ui.weeklyTooltip, env.ui.tokenTooltip]) assert.doesNotMatch(tip.textContent, english);
+	assert.match(env.ui.sessionTooltip.textContent, /45% usado · 55% restante/);
+	assert.match(env.ui.sessionTooltip.textContent, /Lecturas recientes: 40% → 45%/);
+	assert.match(env.ui.weeklyTooltip.textContent, /Cuota semanal/);
+	env.ui.setUsage(null);
+	assert.equal(env.ui.sessionPctSpan.textContent, 'sin datos aún');
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'loading' });
+	assert.equal(env.ui.tokenDisplay.textContent, 'Contando…');
+	env.ui.setTokenCounter({ enabled: true, active: true, totalTokens: null, status: 'error' });
+	assert.equal(env.ui.tokenDisplay.textContent, 'Tokens no disponibles');
+});
+
+// #7: the soft fade above the bars belongs to ongoing conversations, in Chat and in Claude Code.
+function fadeOn(pathname, { rowTop = 500 } = {}) {
+	const env = createUiEnv({ pathname });
+	env.dom.buildComposer();
+	env.ui.attach();
+	env.ui.usageLine.getBoundingClientRect = () => ({ left: 200, right: 840, width: 640, top: rowTop, bottom: rowTop + 24, height: 24 });
+	env.ui.tick();
+	return env.ui.composerFade;
+}
+
+test('U64 the fade shows above the bars in Chat and Claude Code conversations', () => {
+	for (const path of ['/chat/d017d8c7-6458-4449-884f-64980589c699', '/code/session_01PWd9m9bo3k1fLhqDAJHu8w']) {
+		const fade = fadeOn(path);
+		assert.equal(fade.style.display, 'block', path);
+		assert.equal(fade.style.top, '460px', `${path}: 40px above the row`);
+		assert.equal(fade.style.height, '40px', path);
+	}
+});
+
+test('U65 the fade stays hidden on pages without a transcript and when the bars are off-screen', () => {
+	for (const path of ['/', '/new', '/code', '/code/', '/code/new', '/projects']) {
+		assert.equal(fadeOn(path).style.display, 'none', path);
+	}
+	assert.equal(fadeOn('/code/session_01PWd9m9bo3k1fLhqDAJHu8w', { rowTop: 900 }).style.display, 'none', 'row below the viewport');
+});
+
+// ---- targeted review (#14): history loads cannot outlive their org or lose readings ----------
+
+function heldHistoryReads(env) {
+	const reads = [];
+	const get = env.chrome.storage.local.get;
+	env.chrome.storage.local.get = (keys, cb) => reads.push(() => get(keys, cb));
+	return reads;
+}
+
+test('U69a a history read for org A that lands after switching to B is ignored (C2, switch only)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	env.storageData['claude_session_history:org-a-0001'] = { version: 2, resets_at, history: [10, 20, 30] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 30, resets_at } }); // A's read, held
+	env.ui.setOrg('org-b-0002'); // switch only: no clear in between
+	reads[0](); // A's read lands late, before B's first reading
+	await env.clock.flush();
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/, "A's readings never show under B");
+	env.ui.setUsage({ five_hour: { utilization: 34, resets_at } }); // B, same reset time
+	reads.at(-1)();
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 40, resets_at } });
+	await env.clock.flush();
+	assert.deepEqual(env.storageData['claude_session_history:org-b-0002'].history, [34, 40]);
+	assert.deepEqual(env.storageData['claude_session_history:org-a-0001'].history, [10, 20, 30], 'A is untouched');
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 34% → 40%/);
+});
+
+test('U69b a history read that lands after the bars were cleared is ignored (C2, clear only)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.storageData[key] = { version: 2, resets_at, history: [10, 20, 30] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 35, resets_at } }); // read held
+	env.ui.setUsage(null); // cleared, same org
+	reads[0]();
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 20, 30], 'the queued reading is not saved');
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+});
+
+test('U70 readings that arrive while the saved history loads are appended to it, not written over it (C2)', async () => {
+	const env = createUiEnv();
+	const resets_at = iso(START + HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.storageData[key] = { version: 2, resets_at, history: [10] };
+	const reads = heldHistoryReads(env);
+	const set = env.chrome.storage.local.set;
+	let writes = 0;
+	env.chrome.storage.local.set = (items, cb) => { if (key in items) writes++; return set(items, cb); };
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at } });
+	env.ui.setUsage({ five_hour: { utilization: 25, resets_at } });
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10], 'nothing is saved before the load lands');
+	assert.equal(reads.length, 1, 'one load for the window');
+	reads[0]();
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 20, 25]);
+	assert.equal(writes, 1, 'the queue is saved once');
+});
+
+// ---- simplification D5: the tooltip only shows the history of the window on screen ---------------
+
+test('U72 D5: a new reset window hides the previous window readings until its own history loads', async () => {
+	const env = createUiEnv();
+	const r1 = iso(START + HOUR);
+	const r2 = iso(START + 6 * HOUR);
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 10, resets_at: r1 } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: r1 } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20%/);
+	const reads = heldHistoryReads(env);
+	env.ui.setUsage({ five_hour: { utilization: 3, resets_at: r2 } }); // new window, read held
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+	reads[0]();
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 5, resets_at: r2 } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 3% → 5%/);
+});
+
+test('U73 D5: a reset time going R1 -> R2 -> R1 while R2 loads never saves R2 history under R1', async () => {
+	const env = createUiEnv();
+	const r1 = iso(START + HOUR);
+	const r2 = iso(START + 6 * HOUR);
+	const key = 'claude_session_history:org-a-0001';
+	env.ui.setOrg('org-a-0001');
+	env.ui.setUsage({ five_hour: { utilization: 10, resets_at: r1 } });
+	await env.clock.flush();
+	const reads = heldHistoryReads(env);
+	env.ui.setUsage({ five_hour: { utilization: 3, resets_at: r2 } }); // R2 read held
+	env.ui.setUsage({ five_hour: { utilization: 12, resets_at: r1 } }); // back to R1
+	while (reads.length) { reads.shift()(); await env.clock.flush(); }
+	assert.equal(env.storageData[key].resets_at, r1, 'the saved history belongs to the window on screen');
+	assert.deepEqual(env.storageData[key].history, [10, 12]);
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 12%/);
+});
+
+test('U74 D5: equivalent reset timestamps share saved, pending and loaded history', async () => {
+	const env = createUiEnv();
+	const orgId = 'org-a-0001';
+	const key = `claude_session_history:${orgId}`;
+	const r1 = iso(START + HOUR + 125);
+	const sameReset = r1.replace('.125Z', '.1250Z');
+	env.storageData[key] = { version: 2, resets_at: r1, history: [10] };
+	const reads = heldHistoryReads(env);
+	env.ui.setOrg(orgId);
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: sameReset } });
+	env.ui.setUsage({ five_hour: { utilization: 25, resets_at: r1 } });
+	assert.equal(reads.length, 1, 'the equivalent timestamp joins the pending load');
+	reads[0]();
+	await env.clock.flush();
+	assert.deepEqual(env.storageData[key].history, [10, 20, 25], 'saved history for the same instant is used');
+	env.ui.setUsage({ five_hour: { utilization: 30, resets_at: r1 } });
+	assert.equal(reads.length, 1, 'the equivalent timestamp uses the loaded history');
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20% → 25% → 30%/);
+	assert.equal(env.storageData[key].resets_at, r1, 'persistent history keeps milliseconds');
+
+	const reopened = createUiEnv();
+	reopened.storageData[key] = env.storageData[key];
+	reopened.ui.setOrg(orgId);
+	reopened.ui.setUsage({ five_hour: { utilization: 35, resets_at: r1 } });
+	await reopened.clock.flush();
+	assert.deepEqual(reopened.storageData[key].history, [10, 20, 25, 30, 35]);
+});
+
+test('U75 D5: an invalid reset clears loaded session history', async () => {
+	const env = createUiEnv();
+	const orgId = 'org-a-0001';
+	const key = `claude_session_history:${orgId}`;
+	const reset = iso(START + HOUR);
+	env.ui.setOrg(orgId);
+	env.ui.setUsage({ five_hour: { utilization: 10, resets_at: reset } });
+	await env.clock.flush();
+	env.ui.setUsage({ five_hour: { utilization: 20, resets_at: reset } });
+	assert.match(env.ui.sessionTooltip.textContent, /Recent readings: 10% → 20%/);
+	const reads = heldHistoryReads(env);
+	env.ui.setUsage({ five_hour: { utilization: 30, resets_at: 'unknown' } });
+	assert.equal(reads.length, 0);
+	assert.doesNotMatch(env.ui.sessionTooltip.textContent, /Recent readings/);
+	assert.deepEqual(env.storageData[key].history, [10, 20]);
+});

@@ -3,23 +3,63 @@
 
 	const CC = (globalThis.ClaudeCounter = globalThis.ClaudeCounter || {});
 
+	// Every user-visible string, per language (#6). The page language decides; anything not Spanish
+	// falls back to English. Keep both tables complete: a missing key would show "undefined".
 	const IS_ES = /^es\b/i.test(document.documentElement.lang || globalThis.navigator?.language || '');
 	const L = IS_ES
 		? {
 				session: 'Sesión',
 				weekly: 'Semana',
-				resetsIn: 'Se reinicia en',
-				sessionTip: 'Ventana de uso de 5 horas.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.',
-				weeklyTip: 'Ventana de uso de 7 días.\nLa barra muestra tu consumo; la línea vertical, cuánto pasó de la ventana.\nClic para actualizar.'
+				resetsIn: 'se reinicia en',
+				noData: 'sin datos aún',
+				sessionHeading: 'Cuota de sesión · 5 horas',
+				weeklyHeading: 'Cuota semanal · 7 días, todos los modelos',
+				noDataTip: 'Aún no hay datos. Envía un mensaje o haz clic en las barras para actualizar.',
+				expiredTip: 'Se alcanzó la hora de reinicio. Actualiza para confirmar tu cuota disponible.',
+				usedRemaining: (used, left) => `${used}% usado · ${left}% restante`,
+				resetsAtLocal: (time) => `Se reinicia ${time} (hora local)`,
+				legend: 'Relleno = uso · marca = tiempo transcurrido',
+				recentReadings: (list) => `Lecturas recientes: ${list}`,
+				clickToRefresh: 'Haz clic en las barras para actualizar.',
+				tokensPlaceholder: 'Tokens: —',
+				tokens: (n) => `~${n} tokens`,
+				tokensUnavailable: 'Tokens no disponibles',
+				counting: 'Contando…',
+				tokenTip: 'Tokens aproximados de la conversación\nCuenta el historial visible del chat, no el contexto activo de Claude.\nPuede ser inexacto tras una compactación. Haz clic en el recuento para volver a contar.'
 			}
 		: {
 				session: 'Session',
 				weekly: 'Weekly',
 				resetsIn: 'resets in',
-				sessionTip: '5-hour session window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.',
-				weeklyTip: '7-day usage window.\nThe bar shows your usage; the tick marks elapsed time.\nClick to refresh.'
+				noData: 'no data yet',
+				sessionHeading: 'Session quota · 5 hours',
+				weeklyHeading: 'Weekly quota · 7 days, all models',
+				noDataTip: 'No data yet. Send a message or click the bars to refresh.',
+				expiredTip: 'Reset time reached. Refresh to confirm your available quota.',
+				usedRemaining: (used, left) => `${used}% used · ${left}% remaining`,
+				resetsAtLocal: (time) => `Resets ${time} (local time)`,
+				legend: 'Fill = usage · tick = time elapsed',
+				recentReadings: (list) => `Recent readings: ${list}`,
+				clickToRefresh: 'Click the bars to refresh.',
+				tokensPlaceholder: 'Tokens: —',
+				tokens: (n) => `~${n} tokens`,
+				tokensUnavailable: 'Tokens unavailable',
+				counting: 'Counting…',
+				tokenTip: 'Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.'
 			};
 
+	/**
+	 * Whether the page shows an ongoing conversation, so a transcript can scroll behind the bars and
+	 * the soft fade above them is useful (#7). Chat conversations live at /chat/<id>, Claude Code
+	 * sessions at /code/<id> (e.g. /code/session_01...). Landing pages with no transcript (/, /new,
+	 * /code, /code/new, projects) are excluded so the fade never tints an empty screen.
+	 * The chat match is unanchored, as in 2.1.7, so nested routes such as /project/<p>/chat/<id> keep
+	 * the fade (#12). Real routes beyond /chat/<id> and /code/session_<id> are unverified.
+	 */
+	function isConversationPage(pathname) {
+		const path = pathname || '';
+		return /\/chat\/[^/?#]+/.test(path) || /^\/code\/(?!new(?:[/?#]|$))[^/?#]+/.test(path);
+	}
 
 	function formatResetCountdown(timestampMs) {
 		// <= 0: reset time reached
@@ -45,11 +85,16 @@
 		return `${days}d ${remHours}h`;
 	}
 
+	let tooltipCount = 0;
+
 	function setupTooltip(element, tooltip, { topOffset = 10 } = {}) {
 		if (!element || !tooltip) return;
 		if (element.hasAttribute('data-tooltip-setup')) return;
 		element.setAttribute('data-tooltip-setup', 'true');
 		element.classList.add('cc-tooltipTrigger');
+		// Screen readers announce the tooltip as the trigger's description (#6).
+		if (!tooltip.id) tooltip.id = `cc-tooltip-${++tooltipCount}`;
+		element.setAttribute('aria-describedby', tooltip.id);
 
 		let pressTimer;
 		let hideTimer;
@@ -104,6 +149,16 @@
 		element.addEventListener('pointerleave', (e) => {
 			if (e.pointerType === 'mouse') hide();
 		});
+
+		// Keyboard users get the same tooltip while the trigger has focus. A touch tap also focuses the
+		// trigger, but then the long-press path (with its 3 s auto-hide) owns the tooltip, so only
+		// :focus-visible focus shows it here (#12). Browsers without :focus-visible still show it.
+		element.addEventListener('focus', () => {
+			let keyboard = true;
+			try { keyboard = element.matches(':focus-visible'); } catch {}
+			if (keyboard) show();
+		});
+		element.addEventListener('blur', hide);
 	}
 
 	function makeTooltip(text) {
@@ -130,8 +185,32 @@
 			this.onUsageRefresh = onUsageRefresh || null;
 			this.onTokenCounterRefresh = onTokenCounterRefresh || (() => {});
 			this.sessionHistory = [];
-			this.sessionResetKey = null;
+			this.sessionHistoryResetMs = null;
 			this.refreshingUsage = false;
+			this.orgId = null;
+		}
+
+		/**
+		 * The active organisation (set by main.js). Recent session readings are stored per
+		 * organisation, so switching never mixes one org's readings into another's tooltip (#6).
+		 */
+		setOrg(orgId) {
+			if (orgId === this.orgId) return;
+			this.orgId = orgId || null;
+			this._resetHistory();
+		}
+
+		/** Forget the shown readings and invalidate any history load still in flight (#14). */
+		_resetHistory() {
+			this._historyLoad = null;
+			this.sessionHistory = [];
+			this.sessionHistoryResetMs = null;
+			this._updateSessionTooltip();
+		}
+
+		/** Storage key for the readings, or null while the organisation is unknown (memory only). */
+		_historyKey() {
+			return this.orgId ? `claude_session_history:${this.orgId}` : null;
 		}
 
 		getProgressChrome() {
@@ -143,8 +222,7 @@
 			return {
 				strokeColor: isDark ? CC.COLORS.PROGRESS_OUTLINE_DARK : CC.COLORS.PROGRESS_OUTLINE_LIGHT,
 				fillColor: isDark ? CC.COLORS.PROGRESS_FILL_DARK : CC.COLORS.PROGRESS_FILL_LIGHT,
-				markerColor: isDark ? CC.COLORS.PROGRESS_MARKER_DARK : CC.COLORS.PROGRESS_MARKER_LIGHT,
-				boldColor: isDark ? CC.COLORS.BOLD_DARK : CC.COLORS.BOLD_LIGHT
+				markerColor: isDark ? CC.COLORS.PROGRESS_MARKER_DARK : CC.COLORS.PROGRESS_MARKER_LIGHT
 			};
 		}
 
@@ -210,8 +288,7 @@
 			const fade = this.composerFade;
 			if (!fade) return;
 			const row = this.usageLine;
-			const isChat = /\/chat\/[^/]+/.test(window.location?.pathname || '');
-			if (!isChat || !row?.isConnected || !row.getClientRects().length) {
+			if (!isConversationPage(window.location?.pathname) || !row?.isConnected || !row.getClientRects().length) {
 				fade.style.display = 'none';
 				return;
 			}
@@ -248,10 +325,15 @@
 			fade.style.backgroundImage = `linear-gradient(to bottom, transparent, ${background})`;
 		}
 
+		// Claude rebuilds and hydrates the composer, so the bars must be re-placed when the page
+		// changes. While a reply streams, the page mutates many times per second, and finding the
+		// composer reads layout and computed styles. So the callback itself does no layout work:
+		// it ignores our own nodes and schedules one placement check for the whole burst (#3).
+		// The 1 s tick remains the safety net for anything missed.
 		_observeDom() {
 			this.domObserver = new MutationObserver((records) => {
 				if (records.length && records.every((r) => r.target?.closest?.('.cc-usageRow, .cc-tooltip, .cc-composerFade'))) return;
-				if (this._usageMisplaced()) this._scheduleUsageReattach(150);
+				this._scheduleUsageReattach(150);
 			});
 
 			const startObserving = () => {
@@ -274,7 +356,7 @@
 			this.tokenDisplay = document.createElement('button');
 			this.tokenDisplay.type = 'button';
 			this.tokenDisplay.className = 'cc-tokenCounter cc-hidden';
-			this.tokenDisplay.textContent = 'Tokens: —';
+			this.tokenDisplay.textContent = L.tokensPlaceholder;
 			this.tokenDisplay.addEventListener('click', (event) => {
 				event.stopPropagation();
 				this.onTokenCounterRefresh();
@@ -284,10 +366,22 @@
 			this.quotaGroups.className = 'cc-quotaGroups';
 			this.usageLine.appendChild(this.quotaGroups);
 			const makeGroup = (label) => {
+				// A focusable button: Tab reaches it, Enter/Space refresh, and its accessible name is its
+				// visible text ("Session: 9% · resets in 4h"), so no aria-label overrides it (#6).
 				const group = document.createElement('div');
 				group.className = 'cc-usageGroup';
-				group.setAttribute('role', 'group');
-				group.setAttribute('aria-label', `${label} usage`);
+				group.setAttribute('role', 'button');
+				group.setAttribute('tabindex', '0');
+				group.addEventListener('keydown', (event) => {
+					if (event.key !== 'Enter' && event.key !== ' ') return;
+					// Shortcuts (Ctrl/Cmd/Alt/Shift + key) belong to the browser or page (#12).
+					if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+					// Plain Enter/Space are ours, so Space never scrolls the page, even when held (#14).
+					// A held key refreshes only once.
+					event.preventDefault();
+					if (event.repeat) return;
+					return this._requestUsageRefresh();
+				});
 				const span = document.createElement('span');
 				span.className = 'cc-usageText';
 				const labelEl = document.createElement('span');
@@ -303,7 +397,7 @@
 				bar.appendChild(marker);
 				const pct = document.createElement('span');
 				pct.className = 'cc-usagePct';
-				pct.textContent = 'no data yet';
+				pct.textContent = L.noData;
 				const reset = document.createElement('span');
 				reset.className = 'cc-usageReset';
 				for (const el of [labelEl, bar, pct, reset]) span.appendChild(el);
@@ -325,28 +419,31 @@
 
 			this.refreshProgressChrome();
 
-			this.usageLine.addEventListener('click', async () => {
-				if (!this.onUsageRefresh || this.refreshingUsage) return;
-				this.refreshingUsage = true;
-				this.usageLine.classList.add('cc-usageRow--dim');
-				try {
-					await this.onUsageRefresh();
-				} finally {
-					this.usageLine.classList.remove('cc-usageRow--dim');
-					this.refreshingUsage = false;
-				}
-			});
+			this.usageLine.addEventListener('click', () => this._requestUsageRefresh());
+		}
+
+		/** Mouse click on the row and Enter/Space on a quota button share one refresh. */
+		async _requestUsageRefresh() {
+			if (!this.onUsageRefresh || this.refreshingUsage) return;
+			this.refreshingUsage = true;
+			this.usageLine.classList.add('cc-usageRow--dim');
+			try {
+				await this.onUsageRefresh();
+			} finally {
+				this.usageLine.classList.remove('cc-usageRow--dim');
+				this.refreshingUsage = false;
+			}
 		}
 
 		setTokenCounter({ enabled, active, totalTokens, status }) {
 			const visible = enabled && active;
 			this.tokenDisplay.classList.toggle('cc-hidden', !visible);
 			this.usageLine.classList.toggle('cc-usageRow--tokens', visible);
-			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? `~${totalTokens.toLocaleString()} tokens` : status === 'error' ? 'Tokens unavailable' : 'Counting…';
+			this.tokenDisplay.textContent = typeof totalTokens === 'number' ? L.tokens(totalTokens.toLocaleString()) : status === 'error' ? L.tokensUnavailable : L.counting;
 		}
 
 		_setupTooltips() {
-			this.tokenTooltip = makeTooltip('Approximate conversation tokens\nCounts visible chat history, not Claude’s active context.\nMay be inaccurate after compaction. Click the count to recount.');
+			this.tokenTooltip = makeTooltip(L.tokenTip);
 			setupTooltip(this.tokenDisplay, this.tokenTooltip, { topOffset: 8 });
 			this.sessionTooltip = makeTooltip(
 				this._usageTooltipText('session')
@@ -373,9 +470,8 @@
 			this._attachUsageLine();
 		}
 
-		_attachUsageLine() {
+		_attachUsageLine(box = this._findComposerBox()) {
 			if (!this.usageLine) return;
-			const box = this._findComposerBox();
 			if (!box || !box.parentElement) {
 				this.usageLine.classList.add('cc-unmounted');
 				this._usageAnchor = null;
@@ -390,17 +486,24 @@
 			this.refreshProgressChrome();
 		}
 
+		/** Coalesces placement checks: the first request starts the timer, later ones join it. */
 		_scheduleUsageReattach(delay = 150) {
 			if (this._usageReattachTimer) return;
 			this._usageReattachTimer = setTimeout(() => {
 				this._usageReattachTimer = null;
-				this.attachUsageLine();
+				this._ensureUsagePlacement();
 			}, delay);
 		}
 
-		_usageMisplaced() {
-			if (!this.usageLine) return false;
+		/** One composer scan: re-place the bars only if they are not where they belong. */
+		_ensureUsagePlacement() {
 			const box = this._findComposerBox();
+			if (this._usageMisplaced(box)) this._attachUsageLine(box);
+		}
+
+		/** `box` is the composer found by the caller; pass it to avoid scanning twice. */
+		_usageMisplaced(box = this._findComposerBox()) {
+			if (!this.usageLine) return false;
 			if (!box) return !this.usageLine.classList.contains('cc-unmounted');
 			return this.usageLine.classList.contains('cc-unmounted') || !document.contains(this.usageLine) || this._usageAnchor !== box || this.usageLine.nextElementSibling !== box;
 		}
@@ -433,16 +536,16 @@
 
 		_usageTooltipText(key) {
 			const w = this._tooltipUsage?.[key === 'session' ? 'five_hour' : 'seven_day'];
-			const heading = key === 'session' ? `${L.session} quota · 5 hours` : `${L.weekly} quota · 7 days, all models`;
-			if (!w) return `${heading}\nNo data yet. Send a message or click the bars to refresh.`;
-			if (w.expired) return `${heading}\nReset time reached. Refresh to confirm your available quota.`;
+			const heading = key === 'session' ? L.sessionHeading : L.weeklyHeading;
+			if (!w) return `${heading}\n${L.noDataTip}`;
+			if (w.expired) return `${heading}\n${L.expiredTip}`;
 			const pct = Math.round(Math.max(0, Math.min(100, w.utilization)) * 10) / 10;
-			const lines = [heading, `${pct}% used · ${Math.round((100 - pct) * 10) / 10}% remaining`];
+			const lines = [heading, L.usedRemaining(pct, Math.round((100 - pct) * 10) / 10)];
 			const resetMs = w.resets_at ? Date.parse(w.resets_at) : NaN;
-			if (Number.isFinite(resetMs)) lines.push(`Resets ${new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (local time)`);
-			lines.push('Fill = usage · tick = time elapsed');
-			if (key === 'session' && this.sessionHistory.length > 1) lines.push(`Recent readings: ${this.sessionHistory.map((v) => `${v}%`).join(' → ')}`);
-			lines.push('Click the bars to refresh.');
+			if (Number.isFinite(resetMs)) lines.push(L.resetsAtLocal(new Date(resetMs).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })));
+			lines.push(L.legend);
+			if (key === 'session' && this.sessionHistory.length > 1) lines.push(L.recentReadings(this.sessionHistory.map((v) => `${v}%`).join(' → ')));
+			lines.push(L.clickToRefresh);
 			return lines.join('\n');
 		}
 
@@ -450,63 +553,79 @@
 			if (this.sessionTooltip) this.sessionTooltip.textContent = this._usageTooltipText('session');
 		}
 
+		/**
+		 * Recent session readings, saved per organisation and reset window (#6, #14).
+		 *
+		 * A window's saved history is loaded from storage once. Until that load lands, new readings are
+		 * queued rather than processed, so they can't overwrite the saved history. When the load
+		 * lands, the queue is applied on top of it and saved once. A load belongs to one org and one
+		 * window: switching org, clearing, or a new window invalidates it, so a late read can never
+		 * leak one organisation's readings into another's.
+		 */
 		_updateSessionHistory(resetsAt, currentPct) {
-			if (!resetsAt) {
-				this.sessionHistory = [];
-				this.sessionResetKey = null;
-				this._updateSessionTooltip();
+			const resetMs = Date.parse(resetsAt);
+			if (!Number.isFinite(resetMs)) {
+				this._resetHistory();
+				return;
+			}
+			const key = this._historyKey();
+
+			// Already loaded for this window: update in memory and save.
+			if (this.sessionHistoryResetMs === resetMs) {
+				this._applyReadings(key, resetMs, this.sessionHistory, [currentPct]);
+				return;
+			}
+			// A load for this window is in flight: queue the reading for it.
+			const pendingLoad = this._historyLoad;
+			if (pendingLoad && pendingLoad.key === key && pendingLoad.resetMs === resetMs) {
+				pendingLoad.pending.push(currentPct);
 				return;
 			}
 
-			const processHistory = (storedResetsAt, storedHistory) => {
-				let history = [];
-				if (storedResetsAt === resetsAt && Array.isArray(storedHistory) && storedHistory.length > 0) {
-					history = [...storedHistory];
-				} else {
-					history = [currentPct];
-				}
-
-				const lastVal = history[history.length - 1];
-				if (currentPct > lastVal) {
-					history.push(currentPct);
-					if (history.length > 5) {
-						history = history.slice(-5);
-					}
-				} else if (currentPct < lastVal) {
-					history = [currentPct];
-				}
-
-				this.sessionHistory = history;
-				this.sessionResetKey = resetsAt;
-				this._updateSessionTooltip();
-
-				try {
-					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-						chrome.storage.local.set({
-							claude_session_history: { version: 2, resets_at: resetsAt, history }
-						});
-					}
-				} catch (e) {
-					// ignore storage errors
-				}
+			// A different window: its readings are not the ones on screen, so hide them until this
+			// window's own history loads (D5). This also ends the fast path for the old window, so a
+			// reset time going R1 -> R2 -> R1 loads R1 again instead of saving into R2's history.
+			this.sessionHistory = [];
+			this.sessionHistoryResetMs = null;
+			const load = { key, resetMs, pending: [currentPct] };
+			this._historyLoad = load;
+			const finish = (storedResetsAt, storedHistory) => {
+				if (this._historyLoad !== load) return; // superseded: reset, switched, or a newer load
+				this._historyLoad = null;
+				const base = Date.parse(storedResetsAt) === resetMs && Array.isArray(storedHistory) ? storedHistory : [];
+				this._applyReadings(key, resetMs, base, load.pending);
 			};
-
-			if (this.sessionResetKey !== resetsAt) {
-				this.sessionResetKey = resetsAt;
-				try {
-					if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-						chrome.storage.local.get(['claude_session_history'], (result) => {
-							const data = result?.claude_session_history;
-							processHistory(data?.version === 2 ? data.resets_at : null, data?.history);
-						});
-					} else {
-						processHistory(null, null);
-					}
-				} catch (e) {
-					processHistory(null, null);
+			try {
+				if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
+					chrome.storage.local.get([key], (result) => {
+						const data = result?.[key];
+						finish(data?.version === 2 ? data.resets_at : null, data?.history);
+					});
+				} else {
+					finish(null, null);
 				}
-			} else {
-				processHistory(resetsAt, this.sessionHistory);
+			} catch (e) {
+				finish(null, null);
+			}
+		}
+
+		/** Applies readings in order: a rise is appended (last 5 kept), a drop starts over. Saves once. */
+		_applyReadings(key, resetMs, base, readings) {
+			let history = [...base];
+			for (const pct of readings) {
+				const last = history[history.length - 1];
+				if (!history.length || pct < last) history = [pct];
+				else if (pct > last) history = [...history, pct].slice(-5);
+			}
+			this.sessionHistory = history;
+			this.sessionHistoryResetMs = resetMs;
+			this._updateSessionTooltip();
+			try {
+				if (key && typeof chrome !== 'undefined' && chrome.storage?.local) {
+					chrome.storage.local.set({ [key]: { version: 2, resets_at: new Date(resetMs).toISOString(), history } });
+				}
+			} catch (e) {
+				// ignore storage errors
 			}
 		}
 
@@ -529,7 +648,7 @@
 				return { resetMs, startMs: resetMs ? resetMs - windowMs : null, pct, live: true };
 			}
 
-			pctSpan.textContent = w && w.expired ? '0%' : 'no data yet';
+			pctSpan.textContent = w && w.expired ? '0%' : L.noData;
 			resetSpan.textContent = '';
 			fill.style.width = '0%';
 			fill.classList.remove('cc-caution', 'cc-warn', 'cc-full');
@@ -548,7 +667,6 @@
 			this.weeklyBar.classList.remove('cc-hidden');
 
 			const session = this._renderWindow({
-				label: 'Session',
 				windowMs: 5 * 60 * 60 * 1000,
 				w: usage?.five_hour || null,
 				pctSpan: this.sessionPctSpan,
@@ -560,7 +678,6 @@
 			this._updateSessionHistory(session.live && usage.five_hour.resets_at ? usage.five_hour.resets_at : null, session.pct);
 
 			const weekly = this._renderWindow({
-				label: 'Weekly',
 				windowMs: 7 * 24 * 60 * 60 * 1000,
 				w: usage?.seven_day || null,
 				pctSpan: this.weeklyPctSpan,
@@ -602,7 +719,7 @@
 		}
 
 		tick() {
-			if (this._usageMisplaced()) this.attachUsageLine();
+			this._ensureUsagePlacement();
 			this._syncComposerFade();
 			// Reset text is separate so compact mode can hide it without parsing labels.
 			for (const key of ['session', 'weekly']) {
@@ -614,5 +731,5 @@
 		}
 	}
 
-	CC.ui = { CounterUI };
+	CC.ui = { CounterUI, isConversationPage };
 })();

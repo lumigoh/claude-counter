@@ -12,16 +12,20 @@ const { createFakeChrome } = require('./fake-chrome');
 const SRC = path.join(__dirname, '../../src');
 const START = Date.UTC(2026, 9, 14, 12, 0, 0);
 
-function createUiEnv({ startMs = START } = {}) {
+function createUiEnv({ startMs = START, lang, pathname = '/new' } = {}) {
 	const dom = createFakeDom();
+	// ui.js picks its language from <html lang> when it loads.
+	if (lang) dom.document.documentElement.lang = lang;
 	const clock = createClock(startMs);
 	const fake = createFakeChrome();
 	const refreshes = [];
 
+	const windowListeners = {};
 	const window = {
+		location: { pathname },
 		innerWidth: 1280,
 		innerHeight: 800,
-		addEventListener() {},
+		addEventListener(type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); },
 		getComputedStyle: () => ({ display: 'block', flexDirection: 'row' })
 	};
 
@@ -63,7 +67,9 @@ function createUiEnv({ startMs = START } = {}) {
 	});
 	ui.initialize();
 
-	return { ui, CC, dom, clock, document: dom.document, refreshes, storageData: fake.data };
+	/** Dispatch a window-level event (Escape, scroll, ...) to what ui.js registered. */
+	const fireWindow = (type, event = {}) => { for (const fn of windowListeners[type] || []) fn({ type, ...event }); };
+	return { ui, CC, dom, clock, document: dom.document, refreshes, storageData: fake.data, chrome: fake.chrome, fireWindow };
 }
 
 function iso(ms) {

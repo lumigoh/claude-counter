@@ -12,7 +12,7 @@ const BRIDGE_PATH = path.join(__dirname, '../../src/injected/bridge.js');
 const STREAM_URL = 'https://claude.ai/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline';
 const PERFORM_URL = 'https://claude.ai/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/PerformAction';
 
-function createBridgeEnv({ originalFetch, location } = {}) {
+function createBridgeEnv({ originalFetch, location, cookie = '', nowMs } = {}) {
 	const source = fs.readFileSync(BRIDGE_PATH, 'utf8');
 	const messages = [];
 	const listeners = {};
@@ -32,14 +32,23 @@ function createBridgeEnv({ originalFetch, location } = {}) {
 	};
 	const history = { pushState() {}, replaceState() {} };
 	const documentElement = { dataset: {} };
-	const document = { documentElement };
+	// `cookie` is writable so tests can switch the active organisation the way claude.ai does.
+	const document = { documentElement, cookie };
 
-	new Function('window', 'history', 'document', 'location', source)(window, history, document, window.location);
+	// Event IDs start with the server's epoch milliseconds and the bridge compares them with the
+	// time a stream opened (replay detection, #4). Tests replaying recorded frames pin "now" to
+	// just after the recording with `nowMs`, so those frames count as live replies.
+	// `nowMs` may also be a mutable clock `{ now }`, so a test can open a stream at one time and
+	// deliver its frames later (#17).
+	const readNow = typeof nowMs === 'object' ? () => nowMs.now : () => nowMs;
+	const BridgeDate = nowMs === undefined ? Date : class extends Date { static now() { return readNow(); } };
+	new Function('window', 'history', 'document', 'location', 'Date', source)(window, history, document, window.location, BridgeDate);
 
 	return {
 		window,
 		messages,
 		documentElement,
+		document,
 		events(type) {
 			return messages.filter((m) => m && m.cc === 'ClaudeCounter' && m.type === type).map((m) => m.payload);
 		},

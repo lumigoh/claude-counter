@@ -16,19 +16,34 @@
 
 	// Capture original fetch before anyone else can wrap it
 	const originalFetch = window.fetch;
-	let activeOrgId = null;
-	let orgEpoch = 0;
-	function rememberOrg(id) {
-		if (!id) return;
-		if (activeOrgId && activeOrgId !== id) orgEpoch++;
-		activeOrgId = id;
-	}
-	function streamScope() {
-		if (!activeOrgId) {
-			try { rememberOrg((document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1]); } catch {}
+
+	// Stream labels (2.1.8, issue #2). Every stream is labelled with the organisation it belongs to
+	// and the time it opened, and both travel with each limits message as `meta`. The bridge does
+	// not decide which organisation is active: IDs it sees in requests are only reported as
+	// candidates (cc:org_detected). The content script knows the active organisation and drops
+	// messages from other organisations' streams (main.js handleMessageLimit).
+	//   * Legacy completion requests carry their organisation in the URL: that label is exact.
+	//   * Connect streams (StreamTimeline) do not, so they take the lastActiveOrg cookie at open
+	//     time, or null when it is unreadable.
+	function cookieOrgId() {
+		try {
+			const id = (document.cookie || '').split('; ').find((c) => c.startsWith('lastActiveOrg='))?.split('=')[1];
+			return isPlausibleOrgId(id) ? id : null;
+		} catch {
+			return null;
 		}
-		return { orgId: activeOrgId, epoch: orgEpoch };
 	}
+	// Each stream also gets its own number, so unlabelled streams never share replay/cursor state
+	// with each other (#11): with no organisation to key on, one stream's late frame must not hide
+	// another stream's lower-cursor snapshot.
+	let streamCount = 0;
+	function streamScope(urlOrgId) {
+		return { orgId: urlOrgId || cookieOrgId(), openedAt: Date.now(), id: ++streamCount };
+	}
+	const scopeMeta = (scope) => ({ orgId: scope.orgId, openedAt: scope.openedAt });
+
+	// Same check as CC.isPlausibleOrgId in src/content/constants.js (#5); keep the two in sync.
+	const isPlausibleOrgId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(id) && /\d/.test(id);
 
 	// Wrap history methods early to detect SPA navigation (before frameworks cache them)
 	const originalPushState = history.pushState.bind(history);
@@ -58,13 +73,11 @@
 		}
 
 		// Detect and broadcast active orgId from any Claude API requests
-		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/]+)/);
-		if (orgMatch && orgMatch[1]) {
-			rememberOrg(orgMatch[1]);
-			post('cc:org_detected', { orgId: orgMatch[1] });
-		}
+		const orgMatch = url && url.match(/^https:\/\/claude\.ai\/api\/organizations\/([^/?#]+)/);
+		const requestOrgId = isPlausibleOrgId(orgMatch?.[1]) ? orgMatch[1] : null;
+		if (requestOrgId) post('cc:org_detected', { orgId: requestOrgId });
 
-		const scope = streamScope();
+		const scope = streamScope(requestOrgId);
 		const response = await originalFetch.apply(window, args);
 
 		const contentType = response.headers.get('content-type') || '';
@@ -132,14 +145,14 @@
 						const json = JSON.parse(raw);
 						const limits = json?.message_limit || (json?.type === 'message_limit' ? json : null);
 						if (limits && typeof limits === 'object') {
-							if (!scope || scope.epoch === orgEpoch) post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
+							post('cc:message_limit', limits, scopeMeta(scope));
 						}
 					} catch {
 						// ignore
 					}
 				}
 			}
-			if (announceTurnEnd) post('cc:turn_end', {});
+			if (announceTurnEnd) post('cc:turn_end', {}, scopeMeta(scope));
 		} catch {
 			// best-effort; don't break claude.ai
 		}
@@ -401,8 +414,11 @@
 	// (field 10, "<milliseconds>-<n>"); a limits event whose id was seen before is that replay, not a
 	// new reply. Comparing the limits themselves would not do: two replies in a row can leave them
 	// unchanged (they are rounded to whole percent).
-	const MAX_SEEN_EVENTS = 32;
-	const seenEventIds = new Set();
+	// Replay state lives in two bounded stores (#16): labelled streams (per org) and unlabelled
+	// streams (per stream). Churn from many unlabelled streams evicts only unlabelled entries, so it can
+	// never push out a labelled org's cursors and let an older labelled frame through.
+	const labelledStore = { seen: new Set(), maxSeen: 32, cursors: new Map(), maxCursors: 128 };
+	const unlabelledStore = { seen: new Set(), maxSeen: 32, cursors: new Map(), maxCursors: 64 };
 
 	function eventIdOf(payload) {
 		try {
@@ -418,8 +434,6 @@
 		return null;
 	}
 
-	const windowCursors = new Map();
-	const MAX_WINDOW_CURSORS = 128;
 	function parsedCursor(id) {
 		const match = typeof id === 'string' && id.match(/^(\d+)-(\d+)$/);
 		return match ? [BigInt(match[1]), BigInt(match[2])] : null;
@@ -427,22 +441,24 @@
 	function olderOrEqual(a, b) {
 		return a[0] < b[0] || (a[0] === b[0] && a[1] <= b[1]);
 	}
-	function freshLimits(bytes, limits, scope) {
-		if (scope && scope.epoch !== orgEpoch) return null;
-		const epoch = scope?.epoch ?? orgEpoch;
-		const id = eventIdOf(bytes);
-		const seenKey = JSON.stringify([epoch, id]);
-		if (id && seenEventIds.has(seenKey)) return null;
+	// Replay and ordering protection. Both maps are keyed by the stream's organisation label, so
+	// organisations never share cursors, and a stream opened under A stays valid after the user
+	// visits B and comes back (the old global epoch counter silenced it for good).
+	function freshLimits(id, limits, scope) {
+		const store = scope.orgId ? labelledStore : unlabelledStore;
+		const orgKey = scope.orgId || `stream:${scope.id}`;
+		const seenKey = JSON.stringify([orgKey, id]);
+		if (id && store.seen.has(seenKey)) return null;
 		if (id) {
-			seenEventIds.add(seenKey);
-			if (seenEventIds.size > MAX_SEEN_EVENTS) seenEventIds.delete(seenEventIds.values().next().value);
+			store.seen.add(seenKey);
+			if (store.seen.size > store.maxSeen) store.seen.delete(store.seen.values().next().value);
 		}
 		const cursor = parsedCursor(id);
 		if (!cursor) return limits;
 		const windows = {};
 		for (const [key, value] of Object.entries(limits.windows)) {
-			const windowKey = JSON.stringify([epoch, key]);
-			const previous = windowCursors.get(windowKey);
+			const windowKey = JSON.stringify([orgKey, key]);
+			const previous = store.cursors.get(windowKey);
 			if (previous && olderOrEqual(cursor, previous.cursor)) {
 				// Reset identifiers may be missing or corrected. Only a provably new window
 				// can bypass the previous cursor; changing a future timestamp is not enough.
@@ -450,10 +466,10 @@
 				if (!newWindow) continue;
 			}
 			windows[key] = value;
-			windowCursors.delete(windowKey);
-			windowCursors.set(windowKey, { cursor, resetsAt: value.resets_at });
+			store.cursors.delete(windowKey);
+			store.cursors.set(windowKey, { cursor, resetsAt: value.resets_at });
 		}
-		while (windowCursors.size > MAX_WINDOW_CURSORS) windowCursors.delete(windowCursors.keys().next().value);
+		while (store.cursors.size > store.maxCursors) store.cursors.delete(store.cursors.keys().next().value);
 		return Object.keys(windows).length ? { ...limits, windows } : null;
 	}
 
@@ -466,11 +482,26 @@
 			if (!bytes) return;
 		}
 		const parsed = extractLimits(bytes);
-		const limits = parsed && freshLimits(bytes, parsed, scope);
-		if (limits) {
-			post('cc:message_limit', limits, { orgId: scope?.orgId || activeOrgId });
-			post('cc:turn_end', {});
-		}
+		if (!parsed) return;
+		const id = eventIdOf(bytes);
+		const limits = freshLimits(id, parsed, scope);
+		if (!limits) return;
+		post('cc:message_limit', limits, scopeMeta(scope));
+		// Only a reply that finished while this stream was open is a turn end. When a stream (re)opens
+		// the server may first send the latest limits event again; its id is older than the stream.
+		// Those limits still update the bars, but announcing a turn would make the optional token
+		// counter recount for nothing (#4).
+		// The turn end carries the stream's label too, so the token counter can ignore another org's (#11).
+		if (!isReplayedEvent(id, scope)) post('cc:turn_end', {}, scopeMeta(scope));
+	}
+
+	// Event ids start with the server's epoch milliseconds. Allow for the user's clock being ahead
+	// of the server's: only an event clearly older than the stream counts as a replay.
+	const REPLAY_CLOCK_ALLOWANCE_MS = 2 * 60 * 1000;
+	function isReplayedEvent(id, scope) {
+		const cursor = parsedCursor(id);
+		if (!cursor || !Number.isFinite(scope?.openedAt)) return false;
+		return Number(cursor[0]) < scope.openedAt - REPLAY_CLOCK_ALLOWANCE_MS;
 	}
 
 	async function handleConnectStream(response, scope) {
@@ -518,7 +549,7 @@
 			if (kind === 'usage') {
 				const orgId = payload?.orgId;
 				if (!orgId) throw new Error('Missing orgId');
-				const res = await originalFetch(`https://claude.ai/api/organizations/${orgId}/usage`, {
+				const res = await originalFetch(`https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`, {
 					method: 'GET',
 					credentials: 'include'
 				});
@@ -533,7 +564,7 @@
 				const conversationId = payload?.conversationId;
 				if (!orgId || !conversationId) throw new Error('Missing orgId/conversationId');
 
-				const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=true&rendering_mode=messages&render_all_tools=true`;
+				const url = `https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/chat_conversations/${encodeURIComponent(conversationId)}?tree=true&rendering_mode=messages&render_all_tools=true`;
 				const res = await originalFetch(url, {
 					method: 'GET',
 					credentials: 'include'
@@ -544,7 +575,9 @@
 				if (!json || !(json.chat_messages || json.uuid || json.current_leaf_message_uuid)) {
 					throw new Error('Not a conversation');
 				}
-				post('cc:conversation', { orgId, conversationId, data: json });
+				// Only the requester gets the conversation. It used to be broadcast as well
+				// (cc:conversation), which nothing listened to and cost a second structured clone of
+				// a possibly very large object (#6).
 				postResponse(requestId, true, json, null);
 				return;
 			}
